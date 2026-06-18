@@ -1,9 +1,12 @@
-const express = require('express');
-const { WebSocketServer, WebSocket } = require('ws');
-const http = require('http');
-const path = require('path');
-const fs = require('fs');
-const geomagnetism = require('geomagnetism');
+import express from 'express';
+import { WebSocketServer, WebSocket } from 'ws';
+import http from 'http';
+import path from 'path';
+import fs from 'fs';
+import geomagnetism from 'geomagnetism';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const geoModel = geomagnetism.model(); // IGRF model for current date
 
 const LOG_FILE = path.join(__dirname, 'debug.log');
