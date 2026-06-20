@@ -1,22 +1,22 @@
-import './legend.js'; // instantiates the legend/filter control as a side effect (also loads saved UI settings, via settings.js)
-import { loadVesselData, saveVesselData, saveVesselDataSync, storageSummaryText } from './storage.js';
-import { startStatsLoop } from './stats.js';
-import { initWebSocket } from './websocket.js';
-import { flushMessageQueue, pruneOldFixes, initLabelViewport } from './messages.js';
-import { initSmoothMotionControls, startSmoothMotionLoop, setVisibilityRefresher } from './smoothMotion.js';
-import { loadSettings, resetSettings, saveSettings } from './settings.js';
-import { filterState, applyVisibility } from './visibility.js';
-import { ships } from './state.js';
-import { initFixesPanel, refreshFixesPanel } from './fixesPanel.js';
+import './legend.mjs'; // instantiates the legend/filter control as a side effect (also loads saved UI settings, via settings.mjs)
+import { loadVesselData, saveVesselData, saveVesselDataSync, storageSummaryText } from './storage.mjs';
+import { startStatsLoop } from './stats.mjs';
+import { initWebSocket } from './websocket.mjs';
+import { flushMessageQueue, pruneOldFixes, initLabelViewport } from './messages.mjs';
+import { initSmoothMotionControls, startSmoothMotionLoop, setVisibilityRefresher } from './smoothMotion.mjs';
+import { loadSettings, resetSettings, saveSettings } from './settings.mjs';
+import { filterState, applyVisibility } from './visibility.mjs';
+import { ships } from './state.mjs';
+import { initFixesPanel, refreshFixesPanel } from './fixesPanel.mjs';
 
 loadVesselData();
 setInterval(saveVesselData, 30_000);
 setInterval(saveSettings, 5_000);
-// Incoming AIS messages are queued (websocket.js) rather than applied the
+// Incoming AIS messages are queued (websocket.mjs) rather than applied the
 // instant each one arrives — drained in one coalesced batch every
 // filterState.messageFlushMs (Debug slider, cookie-saved), so a burst of
 // reports for the same ship costs one icon/trail redraw instead of one per
-// message. saveVesselData() also flushes the queue itself (see storage.js)
+// message. saveVesselData() also flushes the queue itself (see storage.mjs)
 // before reading ship state, so a save can't catch stale, not-yet-applied
 // data sitting in the queue. Re-scheduled (rather than setInterval) so it
 // always picks up the slider's current value on its next tick.
@@ -33,14 +33,14 @@ startStatsLoop();
 initWebSocket();
 initLabelViewport();
 initFixesPanel();
-// Lets smoothMotion.js refresh every ship's visibility when smooth motion is
+// Lets smoothMotion.mjs refresh every ship's visibility when smooth motion is
 // toggled (so the straight-segment trail appears/disappears at once), without
-// importing visibility.js — which already imports from smoothMotion.js.
+// importing visibility.mjs — which already imports from smoothMotion.mjs.
 setVisibilityRefresher(() => { for (const mmsi of ships.keys()) applyVisibility(mmsi); });
 initSmoothMotionControls();
-// Passed in (rather than imported by smoothMotion.js) to avoid a circular
-// import: visibility.js already imports smoothMotionState/historicalState
-// from smoothMotion.js.
+// Passed in (rather than imported by smoothMotion.mjs) to avoid a circular
+// import: visibility.mjs already imports smoothMotionState/historicalState
+// from smoothMotion.mjs.
 startSmoothMotionLoop(() => filterState.trailSec, () => filterState.leadSec, () => filterState.showFixes);
 
 // The periodic saves above can miss the last few seconds of changes if the

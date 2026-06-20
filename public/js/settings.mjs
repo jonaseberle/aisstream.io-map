@@ -1,10 +1,10 @@
-import { filterState, hiddenCategories, hiddenTypes } from './visibility.js';
-import { smoothMotionState } from './smoothMotion.js';
-import { boundsRectState } from './websocket.js';
+import { filterState, hiddenCategories, hiddenTypes } from './visibility.mjs';
+import { smoothMotionState } from './smoothMotion.mjs';
+import { boundsRectState } from './websocket.mjs';
 
 // Persists UI settings (filters, smooth motion, the bounds-rect freeze
 // toggle) across reloads via a cookie — separate from the ship/vessel DATA
-// persistence in storage.js, which uses localStorage and is unaffected by this.
+// persistence in storage.mjs, which uses localStorage and is unaffected by this.
 const COOKIE_NAME = 'ais_ui_settings';
 const COOKIE_MAX_AGE_DAYS = 365;
 
@@ -61,7 +61,7 @@ export function saveSettings() {
 }
 
 // Apply any saved settings immediately as a side effect of importing this
-// module — must happen before legend.js (or anything else) builds UI that
+// module — must happen before legend.mjs (or anything else) builds UI that
 // reads filterState/hiddenCategories/hiddenTypes/etc., so this is imported
-// as legend.js's very first import.
+// as legend.mjs's very first import.
 loadSettings();

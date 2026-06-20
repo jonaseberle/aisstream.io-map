@@ -1,13 +1,13 @@
-import { map, updateHash } from './map.js';
-import { ships } from './state.js';
-import { applyVisibility } from './visibility.js';
-import { refreshIcon, queueMessage } from './messages.js';
-import { incrementMsgCount } from './stats.js';
-import { saveSettings } from './settings.js';
+import { map, updateHash } from './map.mjs';
+import { ships } from './state.mjs';
+import { applyVisibility } from './visibility.mjs';
+import { refreshIcon, queueMessage } from './messages.mjs';
+import { incrementMsgCount } from './stats.mjs';
+import { saveSettings } from './settings.mjs';
 
 // Looked up lazily (not cached at module load) — #status-dot/#status-text
-// are built by legend.js, and a pre-existing circular import (settings.js
-// <-> websocket.js) means this module's top-level code can run before that
+// are built by legend.mjs, and a pre-existing circular import (settings.mjs
+// <-> websocket.mjs) means this module's top-level code can run before that
 // DOM exists; caching `null` here would silently break the indicator forever.
 function setStatus(className, text) {
   const dot = document.getElementById('status-dot');
@@ -22,7 +22,7 @@ let activeWs = null;
 // so it always reflects what the upstream subscription is using right now.
 // Can be frozen via the checkbox below to inspect a past box without it
 // jumping to the current view — the actual subscription keeps updating either way.
-// `bounds` is kept here (and persisted via settings.js) so the outline can be
+// `bounds` is kept here (and persisted via settings.mjs) so the outline can be
 // redrawn immediately on page load, before the websocket even connects.
 let boundsRect = null;
 export const boundsRectState = { frozen: false, bounds: null };
@@ -107,7 +107,7 @@ function onMapMove() {
 // on the 500ms pan/zoom-settle debounce above, which exists to avoid
 // spamming the server with bounds updates, not to delay the icons), then
 // unhide shortly after — under smooth motion, refreshIcon doesn't touch the
-// marker itself (the loop in smoothMotion.js owns it there); it only
+// marker itself (the loop in smoothMotion.mjs owns it there); it only
 // invalidates smoothIconHeading so that loop's next ~100ms tick redraws at
 // the right size, so unhiding needs to wait for that tick too.
 function onZoomStart() {
@@ -139,7 +139,7 @@ function connect() {
   ws.onmessage = (e) => {
     incrementMsgCount();
     // Parsing/applying is deferred to a periodic batch flush (see
-    // messages.js's queueMessage/flushMessageQueue) — keeps this handler
+    // messages.mjs's queueMessage/flushMessageQueue) — keeps this handler
     // itself cheap even during a burst of many messages back to back.
     queueMessage(e.data);
   };

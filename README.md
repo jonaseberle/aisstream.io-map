@@ -17,7 +17,7 @@ Live AIS ship traffic map powered by [aisstream.io](https://aisstream.io).
 
 ```bash
 npm install
-AIS_API_KEY=your_key_here node server.js
+AIS_API_KEY=your_key_here npm run start
 ```
 
 Open **http://localhost:3000**.
@@ -25,12 +25,12 @@ Open **http://localhost:3000**.
 To use a different port:
 
 ```bash
-PORT=8080 AIS_API_KEY=your_key_here node server.js
+PORT=8080 AIS_API_KEY=your_key_here npm run start
 ```
 
 ## How it works
 
-`server.js` proxies the browser to `wss://stream.aisstream.io` (due to CORS):
+`server.mjs` proxies the browser to `wss://stream.aisstream.io` (due to CORS):
 
 - Forwards AIS messages to all browser clients via a local WebSocket at `/ws`.
 - Updates the bounding box.

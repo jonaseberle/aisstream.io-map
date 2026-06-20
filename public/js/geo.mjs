@@ -1,5 +1,21 @@
 const EARTH_R = 6371000;
 
+// Great-circle distance, in nautical miles.
+export function haversineNM(aLat, aLon, bLat, bLon) {
+  const φ1 = aLat * Math.PI / 180, φ2 = bLat * Math.PI / 180;
+  const dφ = (bLat - aLat) * Math.PI / 180, dλ = (bLon - aLon) * Math.PI / 180;
+  const x = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
+  return 2 * EARTH_R * Math.asin(Math.sqrt(x)) / 1852;
+}
+
+// Always at least 1 decimal — collapsing to an integer when the rounded
+// value happened to land on one (e.g. "0" instead of "0.0") lost exactly
+// the resolution needed to tell two close-together fixes (a moored vessel's
+// few-meter GPS jitter, say) apart from genuinely zero distance.
+export function fmtNM(nm) {
+  return nm.toFixed(1);
+}
+
 // Destination point given a start point, an initial bearing (deg, true
 // north) and a distance (m) — the standard spherical-earth "direct"
 // geodesic formula. Works fine with a negative distance (equivalent to the

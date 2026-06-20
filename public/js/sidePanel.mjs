@@ -2,8 +2,8 @@
 // Settings and AIS Fixes panels as tabs instead of two separate panels that
 // would otherwise stack exactly on top of each other (both full-height,
 // same edge). Self-builds its DOM as a side effect of being imported (same
-// pattern legend.js used to use for the old standalone settings panel), so
-// it's ready before any importer's own top-level code (e.g. legend.js
+// pattern legend.mjs used to use for the old standalone settings panel), so
+// it's ready before any importer's own top-level code (e.g. legend.mjs
 // registering the Settings tab) runs.
 let flyinEl = null;
 let tabBarEl = null;
@@ -56,7 +56,7 @@ export function selectTab(id) {
   renderBody();
 }
 
-// Registers a tab once (called by legend.js for 'settings', fixesPanel.js
+// Registers a tab once (called by legend.mjs for 'settings', fixesPanel.mjs
 // for 'fixes'). `visible: false` lets a tab exist but stay out of the tab
 // bar until something explicitly shows it (setTabVisible) — used for AIS
 // Fixes, which has nothing to display until a vessel's been clicked.

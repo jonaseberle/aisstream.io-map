@@ -1,13 +1,13 @@
-import './settings.js'; // load saved UI settings before building controls below
-import { MAP_SOURCES, setMapSource } from './map.js';
-import { registerTab } from './sidePanel.js';
-import { ships } from './state.js';
-import { CATEGORIES, CATEGORY_TYPES, SHIP_TYPES } from './categories.js';
-import { shapeSvgInner } from './icons.js';
-import { filterState, hiddenCategories, hiddenTypes, applyVisibility, refreshTrail, MAX_AGE_SLIDER_MAX, MAX_LENGTH_SLIDER_MAX, MAX_INTERVAL_SLIDER_MAX, FLOATING_DISPLAY_SLIDER_MAX, MAX_TRAIL_SLIDER_SEC } from './visibility.js';
-import { saveVesselData } from './storage.js';
-import { scheduleLabelRecompute, refreshIcon } from './messages.js';
-import { saveSettings } from './settings.js';
+import './settings.mjs'; // load saved UI settings before building controls below
+import { MAP_SOURCES, setMapSource } from './map.mjs';
+import { registerTab } from './sidePanel.mjs';
+import { ships } from './state.mjs';
+import { CATEGORIES, CATEGORY_TYPES, SHIP_TYPES } from './categories.mjs';
+import { shapeSvgInner } from './icons.mjs';
+import { filterState, hiddenCategories, hiddenTypes, applyVisibility, refreshTrail, MAX_AGE_SLIDER_MAX, MAX_LENGTH_SLIDER_MAX, MAX_INTERVAL_SLIDER_MAX, FLOATING_DISPLAY_SLIDER_MAX, MAX_TRAIL_SLIDER_SEC } from './visibility.mjs';
+import { saveVesselData } from './storage.mjs';
+import { scheduleLabelRecompute, refreshIcon } from './messages.mjs';
+import { saveSettings } from './settings.mjs';
 
 // ── Legend ───────────────────────────────────────────────────────────────
 // Builds the settings/filter panel content — used to be the content of an
@@ -20,29 +20,26 @@ function buildLegendContent() {
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
 
-    // ── Collapse header ── (also hosts the connection status, relocated
-    // from the old page header — same ids, so websocket.js's
-    // getElementById('status-dot'/'status-text') and stats.js's msg-rate
-    // keep working unchanged.)
+    // ── Connection status header ── (relocated from the old page header —
+    // same ids, so websocket.mjs's getElementById('status-dot'/'status-text')
+    // and stats.mjs's msg-rate keep working unchanged.) Just a status
+    // display, not a collapse toggle for the content below — that would
+    // make it look like a header for every other section here, which it
+    // isn't; each .legend-group-title already has its own independent
+    // collapse, and the whole panel can be tucked away via the side panel's
+    // own minimize control (sidePanel.mjs).
     const hdr = document.createElement('div');
     hdr.className = 'legend-header';
     hdr.innerHTML = `<span class="legend-header-left">
         <span id="status-dot" style="display: inline-block"></span>
         <span id="status-text">Connecting…</span>
         <span id="msg-rate-wrap">(<strong id="msg-rate">0</strong> msg/s)</span>
-        <span></span>
-      </span><span class="legend-toggle">▲</span>`;
+      </span>`;
     div.appendChild(hdr);
 
     const content = document.createElement('div');
     content.className = 'legend-content';
     div.appendChild(content);
-
-    hdr.addEventListener('click', () => {
-      const open = !content.classList.contains('collapsed');
-      content.classList.toggle('collapsed', open);
-      hdr.querySelector('.legend-toggle').textContent = open ? '▼' : '▲';
-    });
 
     // ── Global filters ──
     function mkCheckRow(id, label, checked, onChange) {
@@ -135,7 +132,7 @@ function buildLegendContent() {
       <input type="range" id="smooth-motion-slider" min="60" max="3000" step="10" value="300">`;
     smoothMotionBody.appendChild(smSliderRow);
 
-    // initSmoothMotionControls() (called from main.js, after legend.js builds
+    // initSmoothMotionControls() (called from main.mjs, after legend.mjs builds
     // this panel) attaches the real listeners to the elements above — same
     // ids as before, just relocated from the header into this group.
 
@@ -183,8 +180,8 @@ function buildLegendContent() {
     fbRow.className = 'legend-row';
     fbRow.innerHTML = `<label id="freeze-bounds-label" title="Stop updating the dashed bounding-box outline on the map."><input type="checkbox" id="freeze-bounds-checkbox"> Freeze bounds rect</label>`;
     boundsBody.appendChild(fbRow);
-    // initBoundsRectControls() (called from main.js via initWebSocket(),
-    // after legend.js builds this panel) attaches the real listener — same
+    // initBoundsRectControls() (called from main.mjs via initWebSocket(),
+    // after legend.mjs builds this panel) attaches the real listener — same
     // id as before, just relocated from the header into this group.
 
     const boundsSep = document.createElement('div');
@@ -213,7 +210,7 @@ function buildLegendContent() {
     const speedHint = document.createElement('div');
     speedHint.id = 'speed-hint';
     speedHint.className = 'legend-hint';
-    speedHint.textContent = 'Each white dot ahead of the bow = 1 knot of speed';
+    speedHint.textContent = 'Each white dot ahead of the bow = 1 kn of speed';
     displayBody.appendChild(speedHint);
 
     const mapSourceTitle = document.createElement('div');
@@ -222,9 +219,9 @@ function buildLegendContent() {
     mapSourceTitle.textContent = 'Map style:';
     displayBody.appendChild(mapSourceTitle);
 
-    // Applies the cookie-restored choice right away — map.js itself only
+    // Applies the cookie-restored choice right away — map.mjs itself only
     // knows the hardcoded 'dark' default, since it stays filterState-free
-    // to avoid a map.js <-> visibility.js import cycle.
+    // to avoid a map.mjs <-> visibility.mjs import cycle.
     setMapSource(filterState.mapSource);
     for (const [key, label] of Object.entries(MAP_SOURCES)) {
       displayBody.appendChild(mkRadioRow('map-source', `map-source-${key}`, label, filterState.mapSource === key, (e) => {
@@ -267,7 +264,7 @@ function buildLegendContent() {
 
     const filtersBody = mkGroup('Filters', 'filtersCollapsed');
 
-    filtersBody.appendChild(mkCheckRow('filter-show-moving', 'Show moving (&gt;0.5 kts)', filterState.showMoving, (e) => {
+    filtersBody.appendChild(mkCheckRow('filter-show-moving', 'Show moving (&gt;0.5 kn)', filterState.showMoving, (e) => {
       filterState.showMoving = e.target.checked;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
     }));
@@ -502,11 +499,11 @@ function buildLegendContent() {
     resetButton.title = 'Reset settings';
     resetButton.textContent = 'Reset settings';
     content.appendChild(resetButton);
-    // main.js attaches the real click handler — same id as before, just
+    // main.mjs attaches the real click handler — same id as before, just
     // relocated from the header into the settings panel itself.
 
     // Persist every filter/category/type change immediately, rather than
-    // waiting for main.js's periodic save — catches changes made right
+    // waiting for main.mjs's periodic save — catches changes made right
     // before a reload/close.
     content.addEventListener('change', () => saveSettings());
     content.addEventListener('input', () => saveSettings());
@@ -517,6 +514,6 @@ function buildLegendContent() {
 }
 
 // Settings is a permanent, non-closable tab in the shared side panel (see
-// sidePanel.js) — it's always there, unlike AIS Fixes (fixesPanel.js),
+// sidePanel.mjs) — it's always there, unlike AIS Fixes (fixesPanel.mjs),
 // which only appears once a vessel's been clicked and can be closed again.
 registerTab('settings', 'Settings', buildLegendContent());

@@ -123,6 +123,17 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
   padding: 3px 0;
 }
 .fixes-header-row { color: var(--color-text-secondary); font-weight: 600; border-bottom: 1px solid var(--color-border); margin-bottom: 4px; }
+.fixes-pos { font-size: 10px; color: var(--color-text-secondary); font-family: ui-monospace, monospace; padding-bottom: 3px; }
+/* Wraps one fix's row+pos together so the border below encloses both — the
+   vessel's CURRENT position: the single newest fix in live mode, or both
+   fixes bracketing the interpolated position in smooth motion. */
+.fixes-fix-current {
+  border: 1px solid var(--color-accent); border-radius: 4px;
+  padding: 2px 4px; margin: 2px 0;
+}
+/* Marks the fix that tripped "speed unreliable" or "position unreliable"
+   (messages.js's spoof check) — hover for which, and why, via title=. */
+.fixes-warn { color: var(--color-warn); font-weight: 700; cursor: help; }
 .fixes-interval {
   text-align: center; color: var(--color-text-secondary); font-size: 11px;
   padding: 2px 0; font-family: ui-monospace, monospace;
@@ -198,7 +209,7 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 .legend-row input[type=checkbox] { cursor: pointer; accent-color: var(--color-accent); }
 .legend-header {
   display: flex; justify-content: space-between; align-items: center;
-  cursor: pointer; margin-bottom: 8px; font-weight: 600; font-size: 13px; color: var(--color-accent);
+  margin-bottom: 8px; font-weight: 600; font-size: 13px; color: var(--color-accent);
 }
 .legend-header-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .legend-toggle { font-size: 10px; color: var(--color-text-secondary); margin-left: 8px; }
@@ -232,8 +243,7 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 }
 .legend-drill:hover { color: var(--color-accent); }
 
-/* Legend collapse / sub-type drill-down (state toggled via classList in legend.js) */
-.legend-content.collapsed { display: none; }
+/* Sub-type drill-down (state toggled via classList in legend.mjs) */
 .legend-subcontainer { display: none; }
 .legend-subcontainer.open { display: block; }
 .legend-subcontainer.cat-dimmed { opacity: 0.3; }

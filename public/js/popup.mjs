@@ -1,9 +1,9 @@
-import { ships, staticData, NAV_STATUS } from './state.js';
-import { bestHeading, hdgBad, cogBad } from './heading.js';
-import { SPOOF_SPEED_KNOTS } from './spoof.js';
-import { filterState, navStatusUnreliable } from './visibility.js';
-import { smoothMotionState, historicalState, targetTimestamp } from './smoothMotion.js';
-import { gpsAntennaPosition } from './geo.js';
+import { ships, staticData, NAV_STATUS } from './state.mjs';
+import { bestHeading, hdgBad, cogBad } from './heading.mjs';
+import { SPOOF_SPEED_KNOTS } from './spoof.mjs';
+import { filterState, navStatusUnreliable } from './visibility.mjs';
+import { smoothMotionState, historicalState, targetTimestamp } from './smoothMotion.mjs';
+import { gpsAntennaPosition } from './geo.mjs';
 
 function row(label, value) {
   return `<div class="popup-row"><span class="popup-label">${label}</span><span class="popup-value">${value}</span></div>`;
@@ -84,14 +84,14 @@ export function buildPopup(mmsi) {
     ${row(`Position (middle)${simLabel}`, `lat=${d.lat.toFixed(5)} lon=${d.lon.toFixed(5)}${ship.isFloating ? ' ' + warn('(floating)') : ''}`)}
     ${(()=>{
       // The GPS antenna fix itself isn't stored (only the hull's middle is —
-      // see updateShip in messages.js) — recovered here on demand, only
+      // see updateShip in messages.mjs) — recovered here on demand, only
       // while the setting is on and there's a dim-derived offset to undo.
       if (!filterState.showAntenna || !dim) return '';
       const heading = simulated ? d.hdg : bestHeading(d.cog, d.hdg, d.declination);
       const [aLat, aLon] = gpsAntennaPosition(d.lat, d.lon, heading, dim);
       return row(`GPS antenna${simLabel}`, `lat=${aLat.toFixed(5)} lon=${aLon.toFixed(5)}`);
     })()}
-    ${ship.spoofSuspected ? row('⚠ Spoofing?', warn(`speed ${Math.round(ship.maxImpliedKnots)} kts (implied or reported, threshold ${SPOOF_SPEED_KNOTS} kts)`)) : ''}
+    ${ship.spoofSuspected ? row('⚠ Spoofing?', warn(`speed ${Math.round(ship.maxImpliedKnots)} kn (implied or reported, threshold ${SPOOF_SPEED_KNOTS} kn)`)) : ''}
     <div class="popup-fixes-row"><button type="button" class="popup-fixes-btn" data-mmsi="${mmsi}">AIS Fixes ›</button></div>
   `;
 }

@@ -2,10 +2,10 @@
   "name": "aisstream-map",
   "version": "1.0.0",
   "description": "Live AIS ship traffic map",
-  "main": "server.js",
+  "main": "server.mjs",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.mjs"
   },
   "dependencies": {
     "express": "^4.18.2",

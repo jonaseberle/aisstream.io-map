@@ -1,17 +1,27 @@
-import { ships } from './state.js';
-import { speedDotZoomFactor } from './icons.js';
-import { applyVisibility, isShipVisible, isShipMoving, isFloatingNow } from './visibility.js';
-import { refreshIcon } from './messages.js';
-import { refreshPopupIfOpen } from './popup.js';
+import { ships } from './state.mjs';
+import { speedDotZoomFactor } from './icons.mjs';
+import { applyVisibility, isShipVisible, isShipMoving, isFloatingNow } from './visibility.mjs';
+import { refreshIcon } from './messages.mjs';
+import { refreshPopupIfOpen } from './popup.mjs';
 
 function fmtSec(ms) { return `${Math.round(ms / 1000)}s`; }
 
 let msgCount = 0;
 export function incrementMsgCount() { msgCount++; }
 
+// These all live inside the Settings tab's content (legend.mjs) — which the
+// shared side panel (sidePanel.mjs) detaches from the document whenever a
+// different tab (e.g. AIS Fixes) is active. Null-guarded rather than timed
+// around, since "currently detached" is an expected, recurring state now,
+// not a one-off load-order race.
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
 export function startStatsLoop() {
   setInterval(() => {
-    document.getElementById('msg-rate').textContent = msgCount;
+    setText('msg-rate', msgCount);
     msgCount = 0;
 
     let visibleCount = 0, movingCount = 0, singleObsCount = 0;
@@ -36,12 +46,14 @@ export function startStatsLoop() {
       }
     }
 
-    document.getElementById('ship-count').textContent = visibleCount;
-    document.getElementById('moving-count').textContent = movingCount;
-    document.getElementById('single-obs-count').textContent = singleObsCount;
+    setText('ship-count', visibleCount);
+    setText('moving-count', movingCount);
+    setText('single-obs-count', singleObsCount);
 
     const avgEl = document.getElementById('avg-interval');
-    if (intervalSamples.length === 0) {
+    if (!avgEl) {
+      // tab not currently shown — nothing to update
+    } else if (intervalSamples.length === 0) {
       avgEl.textContent = '—';
     } else {
       intervalSamples.sort((a, b) => a - b);
@@ -56,9 +68,7 @@ export function startStatsLoop() {
     const speedHint = document.getElementById('speed-hint');
     if (speedHint) {
       const factor = speedDotZoomFactor();
-      speedHint.textContent = factor === 1
-        ? 'Each white dot ahead of the bow = 1 knot of speed'
-        : `Each white dot ahead of the bow = ${factor} knots of speed`;
+      speedHint.textContent = `Each white dot ahead of the bow = ${factor} kn of speed`;
     }
 
     // Mark vessels timed out after 5 min; refresh visibility for all.

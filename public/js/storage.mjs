@@ -1,13 +1,13 @@
-import { map } from './map.js';
-import { ships, staticData, MAX_TRAIL_POINTS } from './state.js';
-import { CATEGORIES, shipCategory } from './categories.js';
-import { shipIcon } from './icons.js';
-import { resolveHeading, cogBad } from './heading.js';
-import { SPOOF_SPEED_KNOTS } from './spoof.js';
-import { applyVisibility, refreshTrail, isShipMoving, isShipFloating } from './visibility.js';
-import { buildPopup } from './popup.js';
-import { flushMessageQueue } from './messages.js';
-import { setFixesPanelShip } from './fixesPanel.js';
+import { map } from './map.mjs';
+import { ships, staticData, MAX_TRAIL_POINTS } from './state.mjs';
+import { CATEGORIES, shipCategory } from './categories.mjs';
+import { shipIcon } from './icons.mjs';
+import { resolveHeading, cogBad } from './heading.mjs';
+import { SPOOF_SPEED_KNOTS } from './spoof.mjs';
+import { applyVisibility, refreshTrail, isShipMoving, isShipFloating } from './visibility.mjs';
+import { buildPopup } from './popup.mjs';
+import { flushMessageQueue } from './messages.mjs';
+import { setFixesPanelShip } from './fixesPanel.mjs';
 
 // ── localStorage persistence ──────────────────────────────────────────────
 export const STORAGE_KEY_SHIPS  = 'ais_ships';
@@ -50,7 +50,7 @@ function storageDetailTitle({ vesselCount, fixCount, usedKB, pct }) {
   return lines.join('\n');
 }
 
-// One-line save outcome, meant for the unload banner (main.js) — reflects
+// One-line save outcome, meant for the unload banner (main.mjs) — reflects
 // whatever saveVesselDataSync() just left in storageState.note, alongside
 // the same vessel/fix/size breakdown as the hover tooltip above.
 export function storageSummaryText() {
@@ -127,7 +127,7 @@ function buildSavePayload(shipsToSave, saveStatic, maxPoints) {
       history: ship.history.slice(-maxPoints).map((h) => ({
         lat: +h.lat.toFixed(4), lon: +h.lon.toFixed(4),
         sog: h.sog, cog: h.cog, hdg: h.hdg, navStatus: h.navStatus, declination: h.declination,
-        ts: h.ts, headingReliable: h.headingReliable,
+        ts: h.ts, headingReliable: h.headingReliable, unreliableReason: h.unreliableReason ?? null,
       })),
       spoofSuspected: ship.spoofSuspected || false,
       maxImpliedKnots: ship.maxImpliedKnots || 0,
@@ -167,11 +167,11 @@ function reportSaveFailed(e) {
 // on a string that can run into the hundreds of KB. localStorage itself has
 // no async API, so the .setItem() write still happens here on the main
 // thread, but by then the string is already built — that part is fast.
-// Only the stringify+compress step is offloaded to storageWorker.js.
+// Only the stringify+compress step is offloaded to storageWorker.mjs.
 let worker = null;
 let nextRequestId = 0;
 function compressInWorker(shipsObj, staticObj) {
-  if (!worker) worker = new Worker(new URL('./storageWorker.js', import.meta.url));
+  if (!worker) worker = new Worker(new URL('./storageWorker.mjs', import.meta.url));
   return new Promise((resolve, reject) => {
     const id = ++nextRequestId;
     const onMessage = (e) => {
@@ -279,15 +279,19 @@ export function loadVesselData() {
       const sd    = staticData.get(mmsi);
       const cat   = shipCategory(sd?.typeCode);
       const color = CATEGORIES[cat].color;
-      const spoofSuspected   = (saved.spoofSuspected ?? false) || data.sog > SPOOF_SPEED_KNOTS;
-      const maxImpliedKnots  = Math.max(saved.maxImpliedKnots ?? 0, spoofSuspected ? (data.sog ?? 0) : 0);
+      // Reflects only the latest (most recently saved) fix, same as
+      // messages.mjs computes it going forward — not an ever-growing max, so
+      // a vessel doesn't stay flagged across reloads just because it once
+      // had one bad fix.
+      const spoofSuspected  = saved.spoofSuspected ?? (data.sog > SPOOF_SPEED_KNOTS);
+      const maxImpliedKnots = spoofSuspected ? (saved.maxImpliedKnots ?? data.sog ?? 0) : 0;
       const trailColor = spoofSuspected ? '#ff4444' : CATEGORIES[shipCategory(sd?.typeCode)].color;
       const isFloating = isShipFloating(data.ts);
       const { heading, usingLastKnown } = resolveHeading(data.cog, data.hdg, data.declination, null);
       const dotAngle = !cogBad(data.cog) ? data.cog : heading;
       const trail  = L.polyline(positions, { color: trailColor, weight: 1.5, opacity: 0.6 });
       // data.lat/data.lon already IS the hull's middle — it was stored that
-      // way (see updateShip in messages.js) before ever being saved here.
+      // way (see updateShip in messages.mjs) before ever being saved here.
       const middle = [data.lat, data.lon];
       const marker = L.marker(middle, { icon: shipIcon(heading, dotAngle, data.sog, sd?.typeCode, sd?.dim, isFloating) });
       marker.bindPopup('', { maxWidth: 300 });

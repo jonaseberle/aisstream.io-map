@@ -1,14 +1,14 @@
-import { map } from './map.js';
-import { ships, staticData, MAX_TRAIL_POINTS } from './state.js';
-import { CATEGORIES, shipCategory, shipTypeLabel } from './categories.js';
-import { shipIcon } from './icons.js';
-import { resolveHeading, cogBad, bestHeading } from './heading.js';
-import { SPOOF_SPEED_KNOTS, haversineKnots } from './spoof.js';
-import { applyVisibility, refreshTrail, isFloatingNow, filterState, MAX_TRAIL_SLIDER_SEC } from './visibility.js';
-import { buildPopup, refreshPopupIfOpen } from './popup.js';
-import { smoothMotionState, MAX_DELTA_SECONDS } from './smoothMotion.js';
-import { destinationPoint, shipMiddlePosition } from './geo.js';
-import { setFixesPanelShip } from './fixesPanel.js';
+import { map } from './map.mjs';
+import { ships, staticData, MAX_TRAIL_POINTS, NAV_STATUS } from './state.mjs';
+import { CATEGORIES, shipCategory, shipTypeLabel } from './categories.mjs';
+import { shipIcon } from './icons.mjs';
+import { resolveHeading, cogBad, bestHeading } from './heading.mjs';
+import { SPOOF_SPEED_KNOTS, MIN_SPOOF_DISTANCE_NM, haversineKnots } from './spoof.mjs';
+import { applyVisibility, refreshTrail, isFloatingNow, filterState, MAX_TRAIL_SLIDER_SEC, navStatusUnreliable } from './visibility.mjs';
+import { buildPopup, refreshPopupIfOpen } from './popup.mjs';
+import { smoothMotionState, MAX_DELTA_SECONDS } from './smoothMotion.mjs';
+import { destinationPoint, shipMiddlePosition, haversineNM } from './geo.mjs';
+import { setFixesPanelShip } from './fixesPanel.mjs';
 
 // Gap (m) between the hull's geometric middle and its name label, offset to
 // starboard and rotated around the middle as heading changes — so the label
@@ -52,6 +52,27 @@ function drawLabel(mmsi) {
     ship.label = L.tooltip(labelPos, { permanent: true, direction: 'center', className: 'ship-label', interactive: false })
       .setContent(name).addTo(map);
   }
+}
+
+// Appends "Nav status unreliable"/"Heading unreliable" notes (if
+// applicable) to an in-progress unreliableReason chain for one fix — shared
+// by both ingestion paths below. Distinct from the spoof (speed/position)
+// checks: these don't affect ship.spoofSuspected (the red trail / "⚠
+// Spoofing?" popup row are specifically about implausible speed/position,
+// and already have their own separate UI — the inline Nav status warning,
+// the "Hide unreliable heading/course" filter), but are still worth
+// surfacing per-fix in the AIS Fixes panel.
+function appendNavHeadingReasons(reason, data) {
+  if (navStatusUnreliable(data.sog, data.navStatus)) {
+    const navLabel = NAV_STATUS[data.navStatus] ?? 'Unknown';
+    const navReason = `Nav status unreliable: reports "${navLabel}" but sog ${data.sog.toFixed(1)} kn ≥ 0.5kn`;
+    reason = reason ? `${reason}; ${navReason}` : navReason;
+  }
+  if (bestHeading(data.cog, data.hdg, data.declination) == null) {
+    const hdgReason = 'Heading unreliable: no usable HDG or COG reported';
+    reason = reason ? `${reason}; ${hdgReason}` : hdgReason;
+  }
+  return reason;
 }
 
 // Single-ship label update, for whenever just that ship's own data changes
@@ -155,7 +176,7 @@ export function refreshIcon(mmsi) {
 
 // ── Batched ingestion ─────────────────────────────────────────────────────
 // Incoming WebSocket messages are queued here instead of being processed the
-// instant they arrive — websocket.js pushes raw strings via queueMessage(),
+// instant they arrive — websocket.mjs pushes raw strings via queueMessage(),
 // then a periodic flushMessageQueue() (and one right before every
 // localStorage save, so saved data isn't stale relative to the queue) drains
 // the whole batch at once. Within a batch, the expensive per-ship work
@@ -193,14 +214,14 @@ export function flushMessageQueue() {
 // "Trail" slider can stretch (MAX_TRAIL_SLIDER_SEC) — both are hard slider
 // ceilings, not the live filterState values, so this only ever discards
 // fixes nothing could currently display even at max settings. Runs every
-// tick of the same flush loop as flushMessageQueue (see main.js), for every
+// tick of the same flush loop as flushMessageQueue (see main.mjs), for every
 // ship — not just the dirty ones — since a vessel that's stopped reporting
 // still has aging fixes sitting in memory.
 //
-// Computed inside the function (not as a module-level const) — messages.js
-// and smoothMotion.js import from each other, and evaluating
-// MAX_DELTA_SECONDS at messages.js's own top level can run before
-// smoothMotion.js has finished initializing it, depending on which module
+// Computed inside the function (not as a module-level const) — messages.mjs
+// and smoothMotion.mjs import from each other, and evaluating
+// MAX_DELTA_SECONDS at messages.mjs's own top level can run before
+// smoothMotion.mjs has finished initializing it, depending on which module
 // loads first.
 export function pruneOldFixes() {
   const cutoff = Date.now() - (MAX_DELTA_SECONDS + MAX_TRAIL_SLIDER_SEC) * 1000;
@@ -230,12 +251,12 @@ export function updateShip(msg) {
 
   if (msg.MessageType === 'ShipStaticData') {
     const payload = msg.Message && Object.values(msg.Message)[0];
-    const mmsi = String(payload?.UserID ?? msg.Metadata?.MMSI);
+    const mmsi = String(payload?.UserID ?? msg.MetaData?.MMSI);
     const typeCode = payload?.Type;
     staticData.set(mmsi, {
       typeCode,
       typeLabel: shipTypeLabel(typeCode),
-      name: payload?.Name?.trim() || msg.Metadata?.ShipName?.trim() || null,
+      name: payload?.Name?.trim() || msg.MetaData?.ShipName?.trim() || null,
       dim: payload?.Dimension ?? null,
       draught: payload?.MaximumStaticDraught ?? null,
       callSign: payload?.CallSign?.trim() || null,
@@ -246,7 +267,7 @@ export function updateShip(msg) {
     return;
   }
 
-  const meta = msg.Metadata;
+  const meta = msg.MetaData;
   const pos = msg.Message && Object.values(msg.Message)[0];
   if (!pos) return;
 
@@ -265,7 +286,9 @@ export function updateShip(msg) {
   }
 
   const dim = staticData.get(mmsi)?.dim;
-  const data = { mmsi, name: meta?.ShipName?.trim() || null, lat, lon, cog: pos.Cog, sog: pos.Sog, hdg: pos.TrueHeading, navStatus: pos.NavigationalStatus, declination: msg._declination ?? null, ts: Date.now() };
+  // msg._ts is the upstream-reported time (server.mjs parses MetaData.time_utc)
+  // — falls back to local receipt time only if that's missing/unparseable.
+  const data = { mmsi, name: meta?.ShipName?.trim() || null, lat, lon, cog: pos.Cog, sog: pos.Sog, hdg: pos.TrueHeading, navStatus: pos.NavigationalStatus, declination: msg._declination ?? null, ts: msg._ts ?? Date.now() };
   const typeCode = staticData.get(mmsi)?.typeCode;
   const cat = shipCategory(typeCode);
   const color = CATEGORIES[cat].color;
@@ -285,19 +308,36 @@ export function updateShip(msg) {
     data.lat = middle[0]; data.lon = middle[1];
     // Spoof detection: check implied speed against last known position,
     // and flag a reported sog above the threshold as unreliable outright.
+    // unreliableReason records WHICH check tripped (and why) on THIS fix —
+    // saved on the fix itself (history, below) so the AIS Fixes panel can
+    // point at exactly the fix(es) responsible. ship.spoofSuspected/
+    // maxImpliedKnots, by contrast, reflect ONLY this latest fix (recomputed
+    // fresh each time, not accumulated) — a vessel that reported one bad fix
+    // and has since reported normally again should stop being flagged, not
+    // stay marked red indefinitely.
+    let spoofReason = null;
+    let impliedKnots = 0;
     if (ship.positions.length) {
       const [pLat, pLon] = ship.positions[ship.positions.length - 1];
       const pTs = ship.timestamps[ship.timestamps.length - 1];
       const implied = haversineKnots(pLat, pLon, middle[0], middle[1], data.ts - pTs);
-      if (implied > SPOOF_SPEED_KNOTS) {
-        ship.spoofSuspected = true;
-        ship.maxImpliedKnots = Math.max(ship.maxImpliedKnots ?? 0, implied);
+      const distNM = haversineNM(pLat, pLon, middle[0], middle[1]);
+      if (implied > SPOOF_SPEED_KNOTS && distNM >= MIN_SPOOF_DISTANCE_NM) {
+        spoofReason = `Position unreliable: implied speed ${implied.toFixed(1)} kn from the previous fix (${distNM.toFixed(2)} NM) exceeds ${SPOOF_SPEED_KNOTS} kn`;
+        impliedKnots = implied;
       }
     }
     if (data.sog > SPOOF_SPEED_KNOTS) {
-      ship.spoofSuspected = true;
-      ship.maxImpliedKnots = Math.max(ship.maxImpliedKnots ?? 0, data.sog);
+      const speedReason = `Speed unreliable: reported SOG ${data.sog.toFixed(1)} kn exceeds ${SPOOF_SPEED_KNOTS} kn`;
+      spoofReason = spoofReason ? `${spoofReason}; ${speedReason}` : speedReason;
+      impliedKnots = Math.max(impliedKnots, data.sog);
     }
+    ship.spoofSuspected = spoofReason != null;
+    ship.maxImpliedKnots = impliedKnots;
+    // Everything worth flagging on THIS fix in the AIS Fixes panel — spoof
+    // reasons plus nav-status/heading reliability (see
+    // appendNavHeadingReasons above).
+    const unreliableReason = appendNavHeadingReasons(spoofReason, data);
     // ship.trail's color (red if spoofSuspected) is set by the deferred
     // refreshIcon below, not here — no need to touch it per-message.
     ship.positions.push(middle);
@@ -307,7 +347,7 @@ export function updateShip(msg) {
     // to a previously-seen heading) — smooth motion's "Hide unreliable
     // heading/course" filter needs to know whether the report itself had
     // usable data, not just whether we have *some* heading to animate with.
-    ship.history.push({ lat: middle[0], lon: middle[1], sog: data.sog, cog: data.cog, hdg: data.hdg, navStatus: data.navStatus, declination: data.declination, ts: data.ts, headingReliable: bestHeading(data.cog, data.hdg, data.declination) != null });
+    ship.history.push({ lat: middle[0], lon: middle[1], sog: data.sog, cog: data.cog, hdg: data.hdg, navStatus: data.navStatus, declination: data.declination, ts: data.ts, headingReliable: bestHeading(data.cog, data.hdg, data.declination) != null, unreliableReason });
     if (ship.history.length > MAX_TRAIL_POINTS) ship.history.shift();
     // Computed after the push above, so smooth motion sees this report as
     // the newest "future" point when deciding whether we've run out of data.
@@ -336,7 +376,13 @@ export function updateShip(msg) {
     const middle = shipMiddlePosition(lat, lon, heading, dim);
     data.lat = middle[0]; data.lon = middle[1];
     const positions = [middle];
-    const history = [{ lat: middle[0], lon: middle[1], sog: data.sog, cog: data.cog, hdg: data.hdg, navStatus: data.navStatus, declination: data.declination, ts: data.ts, headingReliable: bestHeading(data.cog, data.hdg, data.declination) != null }];
+    // No previous fix yet to compare against, so only the reported-SOG
+    // check (not the implied-speed-between-fixes one) can apply here.
+    const spoofReason = data.sog > SPOOF_SPEED_KNOTS
+      ? `Speed unreliable: reported SOG ${data.sog.toFixed(1)} kn exceeds ${SPOOF_SPEED_KNOTS} kn`
+      : null;
+    const unreliableReason = appendNavHeadingReasons(spoofReason, data);
+    const history = [{ lat: middle[0], lon: middle[1], sog: data.sog, cog: data.cog, hdg: data.hdg, navStatus: data.navStatus, declination: data.declination, ts: data.ts, headingReliable: bestHeading(data.cog, data.hdg, data.declination) != null, unreliableReason }];
     const isFloating = isFloatingNow(history, data.ts);
     const trail = L.polyline(positions, { color, weight: 1.5, opacity: 0.6 });
     // The marker sits at the hull's middle, not the raw antenna fix — both

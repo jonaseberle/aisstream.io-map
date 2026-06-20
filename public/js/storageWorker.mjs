@@ -4,7 +4,7 @@
 // fleet's worth of ship history serializing+compressing into a real-sized
 // string, synchronously, on the main thread. localStorage itself has no
 // async API, so the actual .setItem() write still happens on the main
-// thread (see storage.js) — but with the string already built, that part
+// thread (see storage.mjs) — but with the string already built, that part
 // is fast.
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js');
 

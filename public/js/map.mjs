@@ -12,7 +12,7 @@ export const map = L.map('map', { preferCanvas: true })
   .setView(initial ? [initial.lat, initial.lon] : [30, 0], initial ? initial.z : 3);
 
 // Switchable base tile sources — kept dependency-free (no filterState import)
-// so map.js stays early/foundational in the import graph; legend.js owns
+// so map.mjs stays early/foundational in the import graph; legend.mjs owns
 // wiring the radio buttons + persisted choice and calls setMapSource().
 export const MAP_SOURCES = {
   dark: 'Dark',
@@ -45,7 +45,7 @@ export function setMapSource(key) {
   }
   for (const layer of activeLayers) layer.addTo(map);
 }
-setMapSource('dark'); // default — legend.js re-applies the saved choice, if any, once it loads
+setMapSource('dark'); // default — legend.mjs re-applies the saved choice, if any, once it loads
 
 export function updateHash() {
   const c = map.getCenter();

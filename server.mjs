@@ -84,6 +84,20 @@ const clients = new Set();
 let currentBounds = null; // [[s,w],[n,e]]
 let aisSocket = null;
 
+// aisstream.io's MetaData.time_utc looks like
+// "2026-06-20 22:32:03.085239788 +0000 UTC" (Go's default time.Time
+// stringification) — not directly parseable by Date(), so reformat to a
+// standard ISO string first. Date only has ms precision anyway, so the
+// rest of the fractional seconds are discarded. Returns null (caller falls
+// back to local receipt time) if the field is missing or unparseable.
+function parseAisTimeUtc(s) {
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:\.(\d+))?/.exec(s ?? '');
+  if (!m) return null;
+  const ms = (m[3] ?? '').padEnd(3, '0').slice(0, 3);
+  const t = Date.parse(`${m[1]}T${m[2]}.${ms}Z`);
+  return Number.isNaN(t) ? null : t;
+}
+
 function inBounds(lat, lon) {
   if (!currentBounds) return true;
   const [[s, w], [n, e]] = currentBounds;
@@ -142,12 +156,12 @@ function connectToAIS() {
     try {
       const msg = JSON.parse(str);
       const payload = msg.Message && Object.values(msg.Message)[0];
-      const mmsi = String(payload?.UserID ?? msg.Metadata?.MMSI ?? '?');
+      const mmsi = String(payload?.UserID ?? msg.MetaData?.MMSI ?? '?');
 
       if (msg.MessageType === 'ShipStaticData') {
         const typeCode = payload?.Type;
         const label = shipTypeLabel(typeCode);
-        const name = payload?.Name?.trim() || msg.Metadata?.ShipName?.trim() || null;
+        const name = payload?.Name?.trim() || msg.MetaData?.ShipName?.trim() || null;
         const dim = payload?.Dimension ?? null;
         const draught = payload?.MaximumStaticDraught ?? null;
         const callSign = payload?.CallSign?.trim() || null;
@@ -159,7 +173,7 @@ function connectToAIS() {
         const dimStr = length ? ` dim=${length}x${width}m draught=${draught}m` : '';
         log(`[ShipStaticData] ${name || 'Unknown'} (${mmsi}) type=${typeCode} (${label})${dimStr}`);
       } else {
-        const name = msg.Metadata?.ShipName?.trim() || 'Unknown';
+        const name = msg.MetaData?.ShipName?.trim() || 'Unknown';
         const lat  = payload?.Latitude;
         const lon  = payload?.Longitude;
         const sog  = payload?.Sog;
@@ -174,18 +188,27 @@ function connectToAIS() {
       }
     } catch (_) {}
 
-    // Enrich position messages with cached static data + magnetic declination
+    // Enrich position messages with cached static data, magnetic declination,
+    // and the upstream-reported timestamp (_ts)
     let outStr = str;
     try {
       const msg = JSON.parse(str);
       if (msg.MessageType !== 'ShipStaticData') {
         const payload = msg.Message && Object.values(msg.Message)[0];
-        const mmsi = String(payload?.UserID ?? msg.Metadata?.MMSI ?? '?');
+        const mmsi = String(payload?.UserID ?? msg.MetaData?.MMSI ?? '?');
         const lat = payload?.Latitude;
         const lon = payload?.Longitude;
         const meta = shipMeta.get(mmsi);
         const extra = {};
         if (meta) extra._meta = meta;
+        // The actual moment aisstream.io received/relayed this report —
+        // used as the fix's timestamp everywhere downstream (trail/history,
+        // spoof detection, fix gaps, smooth motion), instead of whatever
+        // local Date.now() happened to be when our server got around to
+        // processing it. Falls back to the client's own Date.now() (see
+        // messages.mjs) if missing/unparseable.
+        const ts = parseAisTimeUtc(msg.MetaData?.time_utc);
+        if (ts != null) extra._ts = ts;
         if (lat != null && lon != null) {
           // geomagnetism expects [longitude, latitude]
           extra._declination = +geoModel.point([lon, lat]).decl.toFixed(2);

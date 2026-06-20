@@ -1,6 +1,6 @@
-import { map } from './map.js';
-import { CATEGORIES, shipCategory } from './categories.js';
-import { filterState } from './visibility.js';
+import { map } from './map.mjs';
+import { CATEGORIES, shipCategory } from './categories.mjs';
+import { filterState } from './visibility.mjs';
 
 export function pixelsPerMeter(lat, zoom) {
   return (256 * Math.pow(2, zoom)) / (40075016.686 * Math.cos(lat * Math.PI / 180));
@@ -165,7 +165,7 @@ export function shipIcon(headingAngle, dotAngle, sog, typeCode, dim, isFloating)
 
       // The GPS antenna sits wherever the AIS dimension report says, offset
       // from the hull's middle (the rotation pivot — see shipMiddlePosition
-      // in geo.js, which the marker itself is now positioned at).
+      // in geo.mjs, which the marker itself is now positioned at).
       const antennaX = (C - D) / 2; // +starboard
       const antennaY = (A - B) / 2; // +stern
 

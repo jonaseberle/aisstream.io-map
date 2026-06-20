@@ -1,10 +1,11 @@
-import { map } from './map.js';
-import { ships, staticData, NAV_STATUS } from './state.js';
-import { shipIcon, pixelsPerMeter, speedDotZoomFactor, SPEED_DOT_SPACING } from './icons.js';
-import { bestHeading, bestCourse, cogBad, hdgBad, resolveHeading } from './heading.js';
-import { saveSettings } from './settings.js';
-import { updateLabel } from './messages.js';
-import { filterState, isShipMoving, navStatusUnreliable } from './visibility.js';
+import { map } from './map.mjs';
+import { ships, staticData, NAV_STATUS } from './state.mjs';
+import { shipIcon, pixelsPerMeter, speedDotZoomFactor, SPEED_DOT_SPACING } from './icons.mjs';
+import { bestHeading, bestCourse, cogBad, hdgBad, resolveHeading } from './heading.mjs';
+import { saveSettings } from './settings.mjs';
+import { updateLabel } from './messages.mjs';
+import { filterState, isShipMoving, navStatusUnreliable } from './visibility.mjs';
+import { haversineNM, fmtNM } from './geo.mjs';
 
 // "Smooth motion" trades immediacy for smoothness: instead of snapping each
 // marker to its latest reported position the instant a message arrives, it
@@ -16,8 +17,8 @@ export const MIN_DELTA_SECONDS = 60;
 export const MAX_DELTA_SECONDS = 3000;
 export const smoothMotionState = { enabled: false, deltaSec: 300 };
 
-// Refreshes every ship's visibility (set by main.js to avoid a circular
-// import — visibility.js already imports from this module). Called when
+// Refreshes every ship's visibility (set by main.mjs to avoid a circular
+// import — visibility.mjs already imports from this module). Called when
 // smooth motion is toggled, so the straight-segment trail — which is replaced
 // by the smooth past line while smooth motion is on — is added/removed
 // immediately rather than waiting for each ship's next message.
@@ -324,7 +325,7 @@ function snapToLatest(mmsi, ship) {
   const { heading } = resolveHeading(d.cog, d.hdg, d.declination, ship.lastGoodHeading);
   const dotAngle = !cogBad(d.cog) ? d.cog : heading;
   // d.lat/d.lon already IS the hull's middle (computed once on ingestion —
-  // see updateShip in messages.js), so no re-deriving it here.
+  // see updateShip in messages.mjs), so no re-deriving it here.
   ship.middle = [d.lat, d.lon];
   ship.marker.setLatLng(ship.middle);
   ship.marker.setIcon(shipIcon(heading, dotAngle, d.sog, sd?.typeCode, sd?.dim, ship.isFloating));
@@ -533,7 +534,7 @@ function tickEndpoint(lat, lon, angleDeg, lengthM) {
 }
 
 // Length (m) of the cog line, scaled by speed the same way the bow's
-// speed-dot trail is (icons.js: SPEED_DOT_SPACING px per knot, halved per
+// speed-dot trail is (icons.mjs: SPEED_DOT_SPACING px per knot, halved per
 // zoom step below 11) — continuous rather than floored to a dot count,
 // since this is a single line rather than discrete dots.
 function cogLineLengthM(lat, sog) {
@@ -592,17 +593,6 @@ function popupRow(label, value) {
 function warn(text) {
   return `<span class="popup-warn">${text}</span>`;
 }
-export function haversineNM(aLat, aLon, bLat, bLon) {
-  const R = 6371000;
-  const φ1 = aLat * Math.PI / 180, φ2 = bLat * Math.PI / 180;
-  const dφ = (bLat - aLat) * Math.PI / 180, dλ = (bLon - aLon) * Math.PI / 180;
-  const x = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(x)) / 1852;
-}
-export function fmtNM(nm) {
-  const r = Math.round(nm * 10) / 10;
-  return Number.isInteger(r) ? r.toFixed(0) : r.toFixed(1);
-}
 // `[<seconds>s/<distance>NM]` between history fixes a and b, or '' if either
 // index is out of range (near the ends of the stored history).
 function fixGap(history, a, b) {
@@ -621,7 +611,7 @@ function adjacentFixGaps(history, idx) {
 function previousFixGaps(history, idx) {
   return `${fixGap(history, idx - 4, idx - 3)}${fixGap(history, idx - 3, idx - 2)}${fixGap(history, idx - 2, idx - 1)}${fixGap(history, idx - 1, idx)} THIS`;
 }
-// Used by the AIS Fixes side panel (fixesPanel.js), which lists ALL of a
+// Used by the AIS Fixes side panel (fixesPanel.mjs), which lists ALL of a
 // selected vessel's stored fixes for inspection — unbounded by the
 // trail/lead sliders (as if no trail were set at all) and independent of
 // the separate "Show AIS fixes" toggle (filterState.showFixes only controls
@@ -629,6 +619,21 @@ function previousFixGaps(history, idx) {
 // same as the map's own fix circles.
 export function isFixInPanelRange(ship) {
   return ship.onMap;
+}
+
+// Which fix(es) in ship.history the marker's CURRENT position actually
+// corresponds to — used by the AIS Fixes panel to mark them. In live mode
+// that's simply the newest fix (no interpolation, it's always exactly
+// there). Under smooth motion the displayed position is interpolated
+// between the two history fixes bracketing targetTimestamp() (the same
+// bracket historicalState/findBracket use), so both get marked — except at
+// the very ends of history, where it's clamped to a single fix.
+export function currentFixTimestamps(ship) {
+  const history = ship.history;
+  if (!history || !history.length) return [];
+  if (!smoothMotionState.enabled) return [history[history.length - 1].ts];
+  const [li, ri] = findBracket(history, targetTimestamp());
+  return li === ri ? [history[li].ts] : [history[li].ts, history[ri].ts];
 }
 
 // The fix-gap line for a whole ship, showing the 4 intervals BEFORE the fix
@@ -653,7 +658,7 @@ export function buildFixPopup(mmsi, ts) {
   const f = history[idx];
   const sd = staticData.get(mmsi);
   const name = sd?.name || ship.data?.name || '—';
-  // Same format as the vessel popup (popup.js): raw HDG is magnetic, not
+  // Same format as the vessel popup (popup.mjs): raw HDG is magnetic, not
   // true north — only show/use it as a heading once corrected by
   // declination, never bare. usesHdg/usesCog mirror which one the icon's
   // rotation would actually be drawn from for this fix.
@@ -687,7 +692,7 @@ export function buildFixPopup(mmsi, ts) {
 // popup), removes departed ones, and restyles survivors — leaving an open popup
 // untouched as long as its fix stays in view. Shared by both modes: the
 // smooth-motion loop drives it for the lagged trail+lead, and the live trail
-// (visibility.js) drives it for the real-time fixes.
+// (visibility.mjs) drives it for the real-time fixes.
 export function reconcileFixCircles(ship, mmsi, fixSet, color) {
   if (!ship.fixCircles) ship.fixCircles = new Map();
   const cur = ship.fixCircles;

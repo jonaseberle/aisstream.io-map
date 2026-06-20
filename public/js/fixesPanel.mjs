@@ -1,15 +1,16 @@
-import { ships, staticData } from './state.js';
-import { isFixInPanelRange, haversineNM, fmtNM } from './smoothMotion.js';
-import { registerTab, setTabVisible, openSidePanel } from './sidePanel.js';
+import { ships, staticData } from './state.mjs';
+import { isFixInPanelRange, currentFixTimestamps } from './smoothMotion.mjs';
+import { haversineNM, fmtNM } from './geo.mjs';
+import { registerTab, setTabVisible, openSidePanel } from './sidePanel.mjs';
 
-// AIS Fixes tab in the shared side panel (sidePanel.js) — lists ALL of a
+// AIS Fixes tab in the shared side panel (sidePanel.mjs) — lists ALL of a
 // selected vessel's stored AIS fixes, not bounded by the trail/lead sliders
 // (as if no trail were set at all) and independent of the separate "Show
 // AIS fixes" toggle, since this is a debugging aid for inspecting a
 // vessel's raw fixes, not a reflection of what's drawn on the map. Still
 // requires the vessel itself be currently shown (isFixInPanelRange).
 // Unlike Settings, this tab starts hidden and only appears (closable) once
-// the "AIS Fixes ›" button inside a vessel popup (popup.js) is clicked.
+// the "AIS Fixes ›" button inside a vessel popup (popup.mjs) is clicked.
 let selectedMmsi = null;
 let titleEl = null;
 let bodyEl = null;
@@ -17,6 +18,10 @@ let tabShown = false;
 
 function fmtDeg(v) {
   return v != null ? `${v.toFixed(1)}°` : '—';
+}
+
+function escapeAttr(s) {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
 // Z (UTC) time, not the browser's local timezone — every displayed time in
@@ -42,27 +47,40 @@ function renderFixesPanel() {
     bodyEl.innerHTML = '<div class="fixes-empty">Vessel isn’t currently shown on the map.</div>';
     return;
   }
-  let html = `<div class="fixes-header-row"><span>Time</span><span>SOG</span><span>COG</span><span>HDG</span><span>Decl.</span></div>`;
-  for (let i = 0; i < visible.length; i++) {
+  // Latest fix on top — intervals are still computed between chronologically
+  // adjacent fixes (just walked back-to-front), so the time/distance values
+  // themselves are unaffected by the display order.
+  const currentTs = new Set(currentFixTimestamps(ship));
+  let html = `<div class="fixes-header-row"><span>Time</span><span>SOG (kn)</span><span>COG</span><span>HDG</span><span>Decl.</span></div>`;
+  for (let i = visible.length - 1; i >= 0; i--) {
     const f = visible[i];
-    html += `<div class="fixes-row">
-      <span>${fmtTimeZ(f.ts)}</span>
-      <span>${f.sog != null ? f.sog.toFixed(1) : '—'}</span>
-      <span>${fmtDeg(f.cog)}</span>
-      <span>${f.hdg === 511 ? '—' : fmtDeg(f.hdg)}</span>
-      <span>${f.declination != null ? `${f.declination > 0 ? '+' : ''}${f.declination}°` : '—'}</span>
+    // Live mode: the single newest fix IS the current position. Smooth
+    // motion: the two fixes bracketing the interpolated position both are.
+    const isCurrent = currentTs.has(f.ts);
+    const warnMark = f.unreliableReason
+      ? `<span class="fixes-warn" title="${escapeAttr(f.unreliableReason)}">⚠</span> `
+      : '';
+    html += `<div class="fixes-fix${isCurrent ? ' fixes-fix-current' : ''}">
+      <div class="fixes-row">
+        <span>${warnMark}${fmtTimeZ(f.ts)}</span>
+        <span>${f.sog != null ? f.sog.toFixed(1) : '—'}</span>
+        <span>${fmtDeg(f.cog)}</span>
+        <span>${f.hdg === 511 ? '—' : fmtDeg(f.hdg)}</span>
+        <span>${f.declination != null ? `${f.declination > 0 ? '+' : ''}${f.declination}°` : '—'}</span>
+      </div>
+      <div class="fixes-pos">lat=${f.lat.toFixed(5)} lon=${f.lon.toFixed(5)}</div>
     </div>`;
-    if (i < visible.length - 1) {
-      const next = visible[i + 1];
-      const dt = Math.round((next.ts - f.ts) / 1000);
-      const nm = haversineNM(f.lat, f.lon, next.lat, next.lon);
+    if (i > 0) {
+      const prev = visible[i - 1];
+      const dt = Math.round((f.ts - prev.ts) / 1000);
+      const nm = haversineNM(prev.lat, prev.lon, f.lat, f.lon);
       html += `<div class="fixes-interval">${dt} s / ${fmtNM(nm)} NM</div>`;
     }
   }
   bodyEl.innerHTML = html;
 }
 
-// Called from each marker's click handler (messages.js, storage.js) — same
+// Called from each marker's click handler (messages.mjs, storage.mjs) — same
 // moment the vessel popup opens, so the tab (if currently shown) already
 // tracks whichever vessel was last clicked, without forcing it open.
 export function setFixesPanelShip(mmsi) {
@@ -70,7 +88,7 @@ export function setFixesPanelShip(mmsi) {
   if (tabShown) renderFixesPanel();
 }
 
-// Used by the popup's own "AIS Fixes ›" button (popup.js) — selects that
+// Used by the popup's own "AIS Fixes ›" button (popup.mjs) — selects that
 // vessel, reveals the (closable) tab if it was hidden, and switches the
 // shared side panel to it outright. setFixesPanelShip above, by contrast,
 // only updates the selection if the tab already happens to be visible.
@@ -82,7 +100,7 @@ export function openFixesPanel(mmsi) {
   renderFixesPanel();
 }
 
-// Called periodically (main.js) so the list keeps up with the lead/trail
+// Called periodically (main.mjs) so the list keeps up with the lead/trail
 // window sliding forward and new fixes arriving, while the tab is shown.
 export function refreshFixesPanel() {
   if (tabShown) renderFixesPanel();

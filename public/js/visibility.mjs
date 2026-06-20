@@ -1,9 +1,9 @@
-import { map } from './map.js';
-import { ships, staticData } from './state.js';
-import { shipCategory } from './categories.js';
-import { hdgBad, cogBad } from './heading.js';
-import { smoothMotionState, historicalState, targetTimestamp, PAST_TRAIL_OPACITY, reconcileFixCircles, removeFixCircles } from './smoothMotion.js';
-import { updateLabel } from './messages.js';
+import { map } from './map.mjs';
+import { ships, staticData } from './state.mjs';
+import { shipCategory } from './categories.mjs';
+import { hdgBad, cogBad } from './heading.mjs';
+import { smoothMotionState, historicalState, targetTimestamp, PAST_TRAIL_OPACITY, reconcileFixCircles, removeFixCircles } from './smoothMotion.mjs';
+import { updateLabel } from './messages.mjs';
 
 // ── Visibility state ─────────────────────────────────────────────────────
 // Slider ceilings; at these values, the respective "max" filter is disabled.
@@ -11,13 +11,13 @@ export const MAX_AGE_SLIDER_MAX = 600;
 export const MAX_LENGTH_SLIDER_MAX = 400;
 export const MAX_INTERVAL_SLIDER_MAX = 1200;
 export const FLOATING_DISPLAY_SLIDER_MAX = 1200;
-export const MAX_TRAIL_SLIDER_SEC = 7200; // ceiling of the "Trail" slider — also used by messages.js's pruneOldFixes
+export const MAX_TRAIL_SLIDER_SEC = 7200; // ceiling of the "Trail" slider — also used by messages.mjs's pruneOldFixes
 export const filterState = {
   trailSec: 600,
   leadSec: 300, // how far ahead to draw the smooth-motion lead line (smooth motion only)
-  smoothMotionTension: 1.0, // damps the smooth-motion Hermite tangent (0=hugs the straight chord, 1=full dead-reckoning distance/most bulge) — see buildSegment in smoothMotion.js
-  mapSource: 'dark', // see MAP_SOURCES in map.js
-  messageFlushMs: 1000, // how often queued incoming AIS messages are parsed+rendered — see flushMessageQueue in messages.js
+  smoothMotionTension: 1.0, // damps the smooth-motion Hermite tangent (0=hugs the straight chord, 1=full dead-reckoning distance/most bulge) — see buildSegment in smoothMotion.mjs
+  mapSource: 'dark', // see MAP_SOURCES in map.mjs
+  messageFlushMs: 1000, // how often queued incoming AIS messages are parsed+rendered — see flushMessageQueue in messages.mjs
   minAgeSec: 0,
   maxAgeSec: 300,
   minLengthM: 0,
