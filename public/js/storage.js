@@ -7,6 +7,7 @@ import { SPOOF_SPEED_KNOTS } from './spoof.js';
 import { applyVisibility, refreshTrail, isShipMoving, isShipFloating } from './visibility.js';
 import { buildPopup } from './popup.js';
 import { flushMessageQueue } from './messages.js';
+import { setFixesPanelShip } from './fixesPanel.js';
 
 // ── localStorage persistence ──────────────────────────────────────────────
 export const STORAGE_KEY_SHIPS  = 'ais_ships';
@@ -22,11 +23,50 @@ export const storageState = { note: null }; // null = clean save; string = what 
 // actually in progress (`busy`), vs. the brief result flash afterwards
 // (default = success, `error` = failed). Reverts to an idle "fix count"
 // readout once the flash times out, rather than disappearing.
+// Vessel/fix counts (in-memory, what the next save would persist) plus the
+// actual on-disk size of the last save — the full breakdown shown in the
+// indicator's hover tooltip (storageDetailTitle), regardless of which short
+// status text happens to be showing at the time.
+function storageDetail() {
+  const vesselCount = ships.size;
+  let fixCount = 0;
+  for (const ship of ships.values()) fixCount += ship.history.length;
+  let usedKB = null, pct = null;
+  try {
+    const bytes = [STORAGE_KEY_SHIPS, STORAGE_KEY_STATIC, STORAGE_KEY_META]
+      .reduce((sum, k) => sum + (localStorage.getItem(k)?.length ?? 0), 0);
+    usedKB = bytes / 1024;
+    pct = usedKB / STORAGE_QUOTA_KB * 100;
+  } catch (_) {}
+  return { vesselCount, fixCount, usedKB, pct };
+}
+
+function storageDetailTitle({ vesselCount, fixCount, usedKB, pct }) {
+  const lines = [
+    `Vessels: ${vesselCount.toLocaleString()}`,
+    `AIS fixes: ${fixCount.toLocaleString()}`,
+  ];
+  if (usedKB != null) lines.push(`Size: ${usedKB.toFixed(1)} KB / ~5 MB (${pct.toFixed(1)}%)`);
+  return lines.join('\n');
+}
+
+// One-line save outcome, meant for the unload banner (main.js) — reflects
+// whatever saveVesselDataSync() just left in storageState.note, alongside
+// the same vessel/fix/size breakdown as the hover tooltip above.
+export function storageSummaryText() {
+  const { vesselCount, fixCount, usedKB, pct } = storageDetail();
+  if (storageState.note === 'save failed') return '⚠️ Save failed';
+  const sizeNote = usedKB != null ? ` (${usedKB.toFixed(1)} KB / ${pct.toFixed(1)}%)` : '';
+  const evictionNote = storageState.note ? ` — ${storageState.note}` : '';
+  return `✅ Saved ${vesselCount.toLocaleString()} vessels, ${fixCount.toLocaleString()} fixes${sizeNote}${evictionNote}`;
+}
+
 let flashTimer = null;
 function setStorageIndicator(text, variant) {
   const el = document.getElementById('storage-indicator');
   if (!el) return;
   el.textContent = `Storage: ${text}`;
+  el.title = storageDetailTitle(storageDetail());
   el.classList.remove('busy', 'error');
   if (variant) el.classList.add(variant);
   el.classList.add('visible');
@@ -36,89 +76,172 @@ function flashStorageIndicator(text, variant) {
   clearTimeout(flashTimer);
   flashTimer = setTimeout(showIdleStorageIndicator, 10000);
 }
-// Total AIS fixes currently held in memory (sum of each ship's trail) — what
-// the next save would persist — plus the actual on-disk size of the last
-// save, shown while nothing's actively loading/saving.
+// Compact summary shown while nothing's actively loading/saving — the full
+// breakdown (incl. vessel count) is in the hover tooltip set by
+// setStorageIndicator above.
 function showIdleStorageIndicator() {
-  let count = 0;
-  for (const ship of ships.values()) count += ship.history.length;
-  let sizeNote = '';
-  try {
-    const bytes = [STORAGE_KEY_SHIPS, STORAGE_KEY_STATIC, STORAGE_KEY_META]
-      .reduce((sum, k) => sum + (localStorage.getItem(k)?.length ?? 0), 0);
-    const usedKB = bytes / 1024;
-    sizeNote = ` · ${usedKB.toFixed(1)} KB / ~5 MB (${(usedKB / STORAGE_QUOTA_KB * 100).toFixed(1)}%)`;
-  } catch (_) {}
-  setStorageIndicator(`🕐 ${count.toLocaleString()} fixes${sizeNote}`);
+  const { fixCount, usedKB, pct } = storageDetail();
+  const sizeNote = usedKB != null ? ` · ${usedKB.toFixed(1)} KB / ~5 MB (${pct.toFixed(1)}%)` : '';
+  setStorageIndicator(`🕐`);
 }
 
-export function saveVesselData() {
-  // Apply any messages still sitting in the batch queue first — otherwise a
-  // save could persist stale ship state that's about to change the instant
-  // the next periodic flush runs.
-  flushMessageQueue();
-  setStorageIndicator('💾 Saving…', 'busy');
+// Progressively more aggressive eviction states tried on QuotaExceededError,
+// shared by both the sync and worker-based save below — yields the
+// {shipsToSave, saveStatic, maxPoints, step} to try next, ending the
+// sequence once nothing more can be evicted.
+function* evictionSteps() {
   const shipIsMoving = (d) => isShipMoving(d.sog);
   let shipsToSave = ships;          // Map or filtered array of [mmsi, ship]
   let saveStatic  = true;
   let maxPoints   = MAX_TRAIL_POINTS;
   let step        = 0;              // eviction step reached
-
   for (;;) {
-    try {
-      const shipsObj = {};
-      for (const [mmsi, ship] of shipsToSave) {
-        const d = ship.data;
-        shipsObj[mmsi] = {
-          data: { ...d, lat: +d.lat.toFixed(4), lon: +d.lon.toFixed(4) },
-          // The real per-point cog/sog/hdg/navStatus/declination — saved
-          // verbatim so a reload doesn't need to fabricate them (see
-          // loadVesselData). lat/lon here are already the hull's middle.
-          history: ship.history.slice(-maxPoints).map((h) => ({
-            lat: +h.lat.toFixed(4), lon: +h.lon.toFixed(4),
-            sog: h.sog, cog: h.cog, hdg: h.hdg, navStatus: h.navStatus, declination: h.declination,
-            ts: h.ts, headingReliable: h.headingReliable,
-          })),
-          spoofSuspected: ship.spoofSuspected || false,
-          maxImpliedKnots: ship.maxImpliedKnots || 0,
-        };
-      }
-      const staticObj = saveStatic ? Object.fromEntries(staticData) : {};
-      localStorage.setItem(STORAGE_KEY_SHIPS,  LZString.compressToUTF16(JSON.stringify(shipsObj)));
-      localStorage.setItem(STORAGE_KEY_STATIC, LZString.compressToUTF16(JSON.stringify(staticObj)));
-      localStorage.setItem(STORAGE_KEY_META,   String(Date.now()));
-      const parts = [];
-      if (step >= 1) parts.push('dropped no-static vessels');
-      if (step >= 2) parts.push('non-moving vessels');
-      if (step >= 3) parts.push('static data');
-      if (maxPoints < MAX_TRAIL_POINTS) parts.push(`trimmed to ${maxPoints} pts/ship`);
-      storageState.note = parts.length ? parts.join(', ') : null;
-      flashStorageIndicator(storageState.note ? `✅ Saved (${storageState.note})` : '✅ Saved');
-      return;
-    } catch (e) {
-      if (e.name !== 'QuotaExceededError' && e.code !== 22) {
-        console.warn('localStorage save failed:', e.message);
-        storageState.note = 'save failed';
-        flashStorageIndicator('⚠️ Save failed', 'error');
-        return;
-      }
-      step++;
-      if (step === 1) {
-        shipsToSave = new Map([...ships].filter(([mmsi]) => staticData.has(mmsi)));
-      } else if (step === 2) {
-        shipsToSave = new Map([...ships].filter(([mmsi, ship]) => staticData.has(mmsi) && shipIsMoving(ship.data)));
-      } else if (step === 3) {
-        saveStatic = false;
-      } else if (maxPoints >= 2) {
-        maxPoints = Math.floor(maxPoints / 2);
-      } else {
-        console.warn('localStorage: cannot fit data even after full eviction');
-        storageState.note = 'save failed';
-        flashStorageIndicator('⚠️ Save failed', 'error');
-        return;
-      }
+    yield { shipsToSave, saveStatic, maxPoints, step };
+    step++;
+    if (step === 1) {
+      shipsToSave = new Map([...ships].filter(([mmsi]) => staticData.has(mmsi)));
+    } else if (step === 2) {
+      shipsToSave = new Map([...ships].filter(([mmsi, ship]) => staticData.has(mmsi) && shipIsMoving(ship.data)));
+    } else if (step === 3) {
+      saveStatic = false;
+    } else if (maxPoints >= 2) {
+      maxPoints = Math.floor(maxPoints / 2);
+    } else {
+      return; // nothing left to evict
     }
   }
+}
+
+// Plain-data snapshot for one eviction attempt — cheap (just copying/
+// rounding numbers), unlike the JSON.stringify+compress step that follows
+// it, which is the actual expensive part (see saveVesselData below).
+function buildSavePayload(shipsToSave, saveStatic, maxPoints) {
+  const shipsObj = {};
+  for (const [mmsi, ship] of shipsToSave) {
+    const d = ship.data;
+    shipsObj[mmsi] = {
+      data: { ...d, lat: +d.lat.toFixed(4), lon: +d.lon.toFixed(4) },
+      // The real per-point cog/sog/hdg/navStatus/declination — saved
+      // verbatim so a reload doesn't need to fabricate them (see
+      // loadVesselData). lat/lon here are already the hull's middle.
+      history: ship.history.slice(-maxPoints).map((h) => ({
+        lat: +h.lat.toFixed(4), lon: +h.lon.toFixed(4),
+        sog: h.sog, cog: h.cog, hdg: h.hdg, navStatus: h.navStatus, declination: h.declination,
+        ts: h.ts, headingReliable: h.headingReliable,
+      })),
+      spoofSuspected: ship.spoofSuspected || false,
+      maxImpliedKnots: ship.maxImpliedKnots || 0,
+    };
+  }
+  const staticObj = saveStatic ? Object.fromEntries(staticData) : {};
+  return { shipsObj, staticObj };
+}
+
+function isQuotaError(e) {
+  return e.name === 'QuotaExceededError' || e.code === 22;
+}
+
+function commitSave(shipsStr, staticStr, step, maxPoints) {
+  localStorage.setItem(STORAGE_KEY_SHIPS,  shipsStr);
+  localStorage.setItem(STORAGE_KEY_STATIC, staticStr);
+  localStorage.setItem(STORAGE_KEY_META,   String(Date.now()));
+  const parts = [];
+  if (step >= 1) parts.push('dropped no-static vessels');
+  if (step >= 2) parts.push('non-moving vessels');
+  if (step >= 3) parts.push('static data');
+  if (maxPoints < MAX_TRAIL_POINTS) parts.push(`trimmed to ${maxPoints} pts/ship`);
+  storageState.note = parts.length ? parts.join(', ') : null;
+  flashStorageIndicator(storageState.note ? `✅ Saved (${storageState.note})` : '✅ Saved');
+}
+
+function reportSaveFailed(e) {
+  if (e) console.warn('localStorage save failed:', e.message);
+  else console.warn('localStorage: cannot fit data even after full eviction');
+  storageState.note = 'save failed';
+  flashStorageIndicator('⚠️ Save failed', 'error');
+}
+
+// ── Worker-backed save (default) ────────────────────────────────────────
+// JSON.stringify + LZString-compressing a fleet's worth of ship history is
+// the actual cause of the "UI hangs while saving" symptom — real CPU work
+// on a string that can run into the hundreds of KB. localStorage itself has
+// no async API, so the .setItem() write still happens here on the main
+// thread, but by then the string is already built — that part is fast.
+// Only the stringify+compress step is offloaded to storageWorker.js.
+let worker = null;
+let nextRequestId = 0;
+function compressInWorker(shipsObj, staticObj) {
+  if (!worker) worker = new Worker(new URL('./storageWorker.js', import.meta.url));
+  return new Promise((resolve, reject) => {
+    const id = ++nextRequestId;
+    const onMessage = (e) => {
+      if (e.data.id !== id) return;
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+      resolve(e.data);
+    };
+    const onError = (err) => {
+      worker.removeEventListener('message', onMessage);
+      worker.removeEventListener('error', onError);
+      reject(err);
+    };
+    worker.addEventListener('message', onMessage);
+    worker.addEventListener('error', onError);
+    worker.postMessage({ id, shipsObj, staticObj });
+  });
+}
+
+// Guards against periodic ticks overlapping a still-in-flight save — there's
+// no correctness need to run two at once, and the next tick 30s later will
+// just pick up fresher data anyway.
+let saveInFlight = false;
+
+export async function saveVesselData() {
+  if (saveInFlight) return;
+  saveInFlight = true;
+  try {
+    // Apply any messages still sitting in the batch queue first — otherwise
+    // a save could persist stale ship state that's about to change the
+    // instant the next periodic flush runs.
+    flushMessageQueue();
+    setStorageIndicator('💾 Saving…', 'busy');
+    for (const { shipsToSave, saveStatic, maxPoints, step } of evictionSteps()) {
+      try {
+        const { shipsObj, staticObj } = buildSavePayload(shipsToSave, saveStatic, maxPoints);
+        const { shipsStr, staticStr } = await compressInWorker(shipsObj, staticObj);
+        commitSave(shipsStr, staticStr, step, maxPoints);
+        return;
+      } catch (e) {
+        if (!isQuotaError(e)) { reportSaveFailed(e); return; }
+      }
+    }
+    reportSaveFailed(null);
+  } finally {
+    saveInFlight = false;
+  }
+}
+
+// ── Synchronous save (unload-time only) ─────────────────────────────────
+// Used where a save must actually complete before the page goes away
+// (pagehide / visibilitychange→hidden) — the worker round-trip in
+// saveVesselData() above is async, so it can't be relied on to finish in
+// time there. A user is already navigating away at that point, so blocking
+// briefly is the right tradeoff for not losing the last few seconds of data.
+export function saveVesselDataSync() {
+  flushMessageQueue();
+  setStorageIndicator('💾 Saving…', 'busy');
+  for (const { shipsToSave, saveStatic, maxPoints, step } of evictionSteps()) {
+    try {
+      const { shipsObj, staticObj } = buildSavePayload(shipsToSave, saveStatic, maxPoints);
+      const shipsStr  = LZString.compressToUTF16(JSON.stringify(shipsObj));
+      const staticStr = LZString.compressToUTF16(JSON.stringify(staticObj));
+      commitSave(shipsStr, staticStr, step, maxPoints);
+      return;
+    } catch (e) {
+      if (!isQuotaError(e)) { reportSaveFailed(e); return; }
+    }
+  }
+  reportSaveFailed(null);
 }
 
 export function loadVesselData() {
@@ -168,7 +291,7 @@ export function loadVesselData() {
       const middle = [data.lat, data.lon];
       const marker = L.marker(middle, { icon: shipIcon(heading, dotAngle, data.sog, sd?.typeCode, sd?.dim, isFloating) });
       marker.bindPopup('', { maxWidth: 300 });
-      marker.on('click', (e) => { L.DomEvent.stopPropagation(e); marker.getPopup().setContent(buildPopup(mmsi)); marker.openPopup(); });
+      marker.on('click', (e) => { L.DomEvent.stopPropagation(e); marker.getPopup().setContent(buildPopup(mmsi)); marker.openPopup(); setFixesPanelShip(mmsi); });
       const ship = {
         marker, trail, data, positions, timestamps, history, inBounds: map.getBounds().contains([data.lat, data.lon]),
         timedOut: false, spoofSuspected, maxImpliedKnots, isFloating,
@@ -181,7 +304,7 @@ export function loadVesselData() {
       applyVisibility(mmsi);
     }
     console.log(`Restored ${ships.size} vessels from localStorage (saved ${Math.round((Date.now()-savedAt)/1000)}s ago)`);
-    flashStorageIndicator(`✅ Loaded ${ships.size} vessel${ships.size === 1 ? '' : 's'}`);
+    flashStorageIndicator(`✅ Loaded.`);
   } catch (e) {
     console.warn('localStorage load failed:', e.message);
     flashStorageIndicator('⚠️ Load failed', 'error');

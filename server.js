@@ -192,12 +192,31 @@ function connectToAIS() {
   });
 }
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   clients.add(ws);
   log(`Browser connected (${clients.size} total), sending ${shipMeta.size} cached ship records`);
   if (shipMeta.size > 0) {
     ws.send(JSON.stringify({ _type: 'metaCache', data: Object.fromEntries(shipMeta) }));
   }
+
+  // The browser also includes its current bounds right in the connection
+  // URL (in addition to sending a 'setBounds' message once open) — so a
+  // freshly-(re)connecting client's bounds are known immediately, without
+  // waiting on that first message round-trip. Matters most right after a
+  // server restart: aisSocket reconnects to aisstream.io and re-subscribes
+  // within milliseconds, well before any browser's 3s reconnect delay — if
+  // that re-subscribe happened with currentBounds still unset (world-wide)
+  // and stayed that way until the round-trip completed, the upstream feed
+  // would sit on the wrong (much larger) subscription in the meantime.
+  try {
+    const bounds = JSON.parse(new URL(req.url, 'http://x').searchParams.get('bounds'));
+    if (Array.isArray(bounds)) {
+      currentBounds = bounds;
+      const [[s, w], [n, e]] = bounds;
+      log(`Bounds received with connection: SW(${s.toFixed(3)}, ${w.toFixed(3)}) NE(${n.toFixed(3)}, ${e.toFixed(3)})`);
+      if (aisSocket?.readyState === WebSocket.OPEN) subscribe(bounds);
+    }
+  } catch (_) {}
 
   ws.on('close', () => {
     clients.delete(ws);

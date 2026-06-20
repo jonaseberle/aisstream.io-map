@@ -3,9 +3,9 @@ import { map, MAP_SOURCES, setMapSource } from './map.js';
 import { ships } from './state.js';
 import { CATEGORIES, CATEGORY_TYPES, SHIP_TYPES } from './categories.js';
 import { shapeSvgInner } from './icons.js';
-import { filterState, hiddenCategories, hiddenTypes, applyVisibility, refreshTrail, MAX_AGE_SLIDER_MAX, MAX_LENGTH_SLIDER_MAX, MAX_INTERVAL_SLIDER_MAX, FLOATING_DISPLAY_SLIDER_MAX } from './visibility.js';
+import { filterState, hiddenCategories, hiddenTypes, applyVisibility, refreshTrail, MAX_AGE_SLIDER_MAX, MAX_LENGTH_SLIDER_MAX, MAX_INTERVAL_SLIDER_MAX, FLOATING_DISPLAY_SLIDER_MAX, MAX_TRAIL_SLIDER_SEC } from './visibility.js';
 import { saveVesselData } from './storage.js';
-import { updateLabel, refreshIcon } from './messages.js';
+import { scheduleLabelRecompute, refreshIcon } from './messages.js';
 import { saveSettings } from './settings.js';
 
 // ── Legend ───────────────────────────────────────────────────────────────
@@ -74,7 +74,21 @@ const AisLegend = L.Control.extend({
         btn.type = 'button';
         btn.className = 'legend-step-btn';
         btn.textContent = symbol;
-        btn.addEventListener('click', () => bump(delta));
+        // Press-and-hold repeats the bump every 400ms until released —
+        // handled entirely via pointerdown/up (no separate 'click' listener,
+        // which would otherwise double-bump on a plain tap since pointerdown
+        // already fires one immediately).
+        let repeatTimer = null;
+        const stop = () => { clearInterval(repeatTimer); repeatTimer = null; };
+        btn.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          bump(delta);
+          stop();
+          repeatTimer = setInterval(() => bump(delta), 400);
+        });
+        btn.addEventListener('pointerup', stop);
+        btn.addEventListener('pointerleave', stop);
+        btn.addEventListener('pointercancel', stop);
         return btn;
       };
       slider.insertAdjacentElement('beforebegin', mkBtn('‹', -step));
@@ -182,7 +196,7 @@ const AisLegend = L.Control.extend({
     }));
     displayBody.appendChild(mkCheckRow('filter-show-labels', 'Show ship name labels', filterState.showLabels, (e) => {
       filterState.showLabels = e.target.checked;
-      for (const mmsi of ships.keys()) updateLabel(mmsi);
+      scheduleLabelRecompute();
     }));
     displayBody.appendChild(mkCheckRow('filter-show-antenna', 'Show GPS antenna position', filterState.showAntenna, (e) => {
       filterState.showAntenna = e.target.checked;
@@ -218,7 +232,7 @@ const AisLegend = L.Control.extend({
     const sliderRow = document.createElement('div');
     sliderRow.className = 'legend-slider';
     sliderRow.innerHTML = `<label id="trail-label">Trail: ${filterState.trailSec === 0 ? 'off' : filterState.trailSec + 's'}</label>
-      <input type="range" id="trail-slider" min="0" max="7200" step="30" value="${filterState.trailSec}">`;
+      <input type="range" id="trail-slider" min="0" max="${MAX_TRAIL_SLIDER_SEC}" step="30" value="${filterState.trailSec}">`;
     sliderRow.querySelector('#trail-slider').addEventListener('input', (e) => {
       filterState.trailSec = parseInt(e.target.value, 10);
       document.getElementById('trail-label').textContent =
@@ -274,7 +288,7 @@ const AisLegend = L.Control.extend({
     const minAgeRow = document.createElement('div');
     minAgeRow.className = 'legend-slider';
     minAgeRow.innerHTML = `<label id="min-age-label">Min. age: ${filterState.minAgeSec}s</label>
-      <input type="range" id="min-age-slider" min="0" max="600" value="${filterState.minAgeSec}">`;
+      <input type="range" id="min-age-slider" min="0" max="600" step="10" value="${filterState.minAgeSec}">`;
     minAgeRow.querySelector('#min-age-slider').addEventListener('input', (e) => {
       filterState.minAgeSec = parseInt(e.target.value, 10);
       document.getElementById('min-age-label').textContent = `Min. age: ${filterState.minAgeSec}s`;
@@ -283,7 +297,7 @@ const AisLegend = L.Control.extend({
     filtersBody.appendChild(minAgeRow);
 
     ageRow.innerHTML = `<label id="age-label">Max. age: ${filterState.maxAgeSec}s</label>
-      <input type="range" id="age-slider" min="0" max="${MAX_AGE_SLIDER_MAX}" value="${filterState.maxAgeSec}">`;
+      <input type="range" id="age-slider" min="0" max="${MAX_AGE_SLIDER_MAX}" step="10" value="${filterState.maxAgeSec}">`;
     ageRow.querySelector('#age-slider').addEventListener('input', (e) => {
       filterState.maxAgeSec = parseInt(e.target.value, 10);
       document.getElementById('age-label').textContent =
@@ -295,7 +309,7 @@ const AisLegend = L.Control.extend({
     const floatingRow = document.createElement('div');
     floatingRow.className = 'legend-slider';
     floatingRow.innerHTML = `<label id="floating-label">Show floating targets for: ${filterState.floatingDisplaySec}s</label>
-      <input type="range" id="floating-slider" min="0" max="${FLOATING_DISPLAY_SLIDER_MAX}" step="30" value="${filterState.floatingDisplaySec}">`;
+      <input type="range" id="floating-slider" min="0" max="${FLOATING_DISPLAY_SLIDER_MAX}" step="10" value="${filterState.floatingDisplaySec}">`;
     floatingRow.querySelector('#floating-slider').addEventListener('input', (e) => {
       filterState.floatingDisplaySec = parseInt(e.target.value, 10);
       document.getElementById('floating-label').textContent = filterState.floatingDisplaySec >= FLOATING_DISPLAY_SLIDER_MAX
@@ -462,6 +476,16 @@ const AisLegend = L.Control.extend({
     intervalRow.className = 'legend-row';
     intervalRow.innerHTML = `<span>Last update interval (moving vessels): <br><strong id="avg-interval" title="p50 and p80 are percentiles: 50% (resp. 80%) of samples are at or below this value.">—</strong></span>`;
     debugBody.appendChild(intervalRow);
+
+    const flushIntervalRow = document.createElement('div');
+    flushIntervalRow.className = 'legend-slider';
+    flushIntervalRow.innerHTML = `<label id="flush-interval-label" title="How often queued incoming AIS messages are parsed and rendered. Lower = more responsive, more CPU; higher = smoother, more latency.">Message interval: ${filterState.messageFlushMs}ms</label>
+      <input type="range" id="flush-interval-slider" min="100" max="5000" step="100" value="${filterState.messageFlushMs}">`;
+    flushIntervalRow.querySelector('#flush-interval-slider').addEventListener('input', (e) => {
+      filterState.messageFlushMs = parseInt(e.target.value, 10);
+      document.getElementById('flush-interval-label').textContent = `Message interval: ${filterState.messageFlushMs}ms`;
+    });
+    debugBody.appendChild(flushIntervalRow);
 
     const resetSep = document.createElement('div');
     resetSep.className = 'legend-sep';

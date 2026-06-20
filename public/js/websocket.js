@@ -44,18 +44,20 @@ function showSubscribedBounds(bounds) {
   drawBoundsRect(bounds);
 }
 
-function sendBounds(ws) {
-  if (ws?.readyState !== WebSocket.OPEN) return;
-  let bounds;
+function currentBoundsToSend() {
   if (boundsRectState.frozen && boundsRectState.bounds) {
     // Freezing pins the actual subscription too, not just the outline —
     // otherwise the drawn rect (e.g. restored from the settings cookie)
     // would silently disagree with what's really subscribed on the server.
-    bounds = boundsRectState.bounds;
-  } else {
-    const b = map.getBounds();
-    bounds = [[b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]];
+    return boundsRectState.bounds;
   }
+  const b = map.getBounds();
+  return [[b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]];
+}
+
+function sendBounds(ws) {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const bounds = currentBoundsToSend();
   showSubscribedBounds(bounds);
   ws.send(JSON.stringify({ type: 'setBounds', bounds }));
 }
@@ -97,18 +99,41 @@ function onMapMove() {
 }
 
 // Icon dimensions/speed-dot count/cog-line length are all zoom-dependent
-// (pixelsPerMeter, speedDotZoomFactor) — redraw every icon the instant zoom
-// actually settles, rather than waiting on the 500ms pan/zoom-settle debounce
-// above (which exists to avoid spamming the server with bounds updates, not
-// to delay the icons). Without this, the "each dot = N knots" legend hint
-// (which recomputes every second, unconditionally) could say one scale while
-// the icons still visibly showed the previous zoom's.
+// (pixelsPerMeter, speedDotZoomFactor), but markers don't repaint until
+// they're explicitly redrawn — without this they'd stay at their pre-zoom
+// pixel size for a moment after the map's zoom level (and thus everything
+// else's scale) has already changed, looking visibly wrong. So: hide every
+// marker the instant a zoom starts, redraw at zoomend (rather than waiting
+// on the 500ms pan/zoom-settle debounce above, which exists to avoid
+// spamming the server with bounds updates, not to delay the icons), then
+// unhide shortly after — under smooth motion, refreshIcon doesn't touch the
+// marker itself (the loop in smoothMotion.js owns it there); it only
+// invalidates smoothIconHeading so that loop's next ~100ms tick redraws at
+// the right size, so unhiding needs to wait for that tick too.
+function onZoomStart() {
+  for (const ship of ships.values()) {
+    if (ship.onMap) ship.marker.setOpacity(0);
+  }
+}
+
 function onZoomEnd() {
   for (const mmsi of ships.keys()) refreshIcon(mmsi);
+  setTimeout(() => {
+    for (const ship of ships.values()) ship.marker.setOpacity(1);
+  }, 150);
 }
 
 function connect() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  // Bounds are also embedded directly in the connection URL (not just sent
+  // as a 'setBounds' message right after open) — so the server knows them
+  // the instant the connection is established, with no round-trip delay.
+  // Matters most right after a server restart: aisSocket reconnects to
+  // aisstream.io and re-subscribes almost immediately, well before this
+  // browser's reconnect (which waits out the close, then 3s) — without this,
+  // that re-subscribe would briefly use whatever (or no) bounds the server
+  // had before restarting, rather than what's actually on screen.
+  const boundsParam = encodeURIComponent(JSON.stringify(currentBoundsToSend()));
+  const ws = new WebSocket(`ws://${location.host}/ws?bounds=${boundsParam}`);
   activeWs = ws;
   ws.onopen = () => { setStatus('connected', 'Connected'); sendBounds(ws); };
   ws.onmessage = (e) => {
@@ -126,6 +151,7 @@ export function initWebSocket() {
   initBoundsRectControls();
   map.on('moveend', onMapMove);
   map.on('zoomend', onMapMove);
+  map.on('zoomstart', onZoomStart);
   map.on('zoomend', onZoomEnd);
   connect();
 }

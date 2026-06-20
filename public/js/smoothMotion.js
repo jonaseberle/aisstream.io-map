@@ -4,7 +4,7 @@ import { shipIcon, pixelsPerMeter, speedDotZoomFactor, SPEED_DOT_SPACING } from 
 import { bestHeading, bestCourse, cogBad, hdgBad, resolveHeading } from './heading.js';
 import { saveSettings } from './settings.js';
 import { updateLabel } from './messages.js';
-import { filterState } from './visibility.js';
+import { filterState, isShipMoving } from './visibility.js';
 
 // "Smooth motion" trades immediacy for smoothness: instead of snapping each
 // marker to its latest reported position the instant a message arrives, it
@@ -140,7 +140,15 @@ function buildSegment(history, li, ri) {
   // course, so it mustn't be filtered as headingless.
   const headingKnown = h0Resolved != null || h1Resolved != null;
   const h0 = h0Resolved ?? 0, h1 = h1Resolved ?? 0;
-  const c0 = c0Resolved ?? 0, c1 = c1Resolved ?? 0;
+  // COG is meaningless GPS-track noise once a vessel has actually stopped —
+  // a moored ship can still report a "valid" (non-zero, <360) but
+  // essentially random course each fix, just from position jitter at sog≈0.
+  // HDG (gyrocompass-based) stays accurate at any speed, so use it as the
+  // course too while not moving — otherwise that per-fix noise becomes the
+  // curve's own tangent direction, and "heading" (course + crab) swings
+  // arbitrarily between fixes that are really just sitting still.
+  const c0 = isShipMoving(L.sog) ? (c0Resolved ?? h0Resolved ?? 0) : (h0Resolved ?? c0Resolved ?? 0);
+  const c1 = isShipMoving(R.sog) ? (c1Resolved ?? h1Resolved ?? 0) : (h1Resolved ?? c1Resolved ?? 0);
   // filterState.smoothMotionTension (user-adjustable, "Smooth Motion" legend
   // group) scales the tangent vectors down from the full naive dead-
   // reckoning distance (reported speed × segment time). Reported COG
@@ -212,15 +220,29 @@ function kinematicPoint(L, R, frac, seg) {
   const posE = b.m0 * seg.T * seg.V0E + b.p1 * seg.P1E + b.m1 * seg.T * seg.V1E;
   const [lat, lon] = destFromDisplacement(seg.L.lat, seg.L.lon, posN, posE);
 
-  const d = hermiteBasisDeriv(u);
-  const velN = (d.m0 * seg.T * seg.V0N + d.p1 * seg.P1N + d.m1 * seg.T * seg.V1N) / seg.T;
-  const velE = (d.m0 * seg.T * seg.V0E + d.p1 * seg.P1E + d.m1 * seg.T * seg.V1E) / seg.T;
-  // Falls back to the nearest endpoint's course when the ship isn't moving
-  // (zero tangent — e.g. stopped at both ends), where direction-of-travel
-  // is undefined.
-  const course = Math.hypot(velN, velE) > 1e-6
-    ? (Math.atan2(velE, velN) * 180 / Math.PI + 360) % 360
-    : (u < 0.5 ? seg.c0 : seg.c1);
+  // When BOTH ends report ~0 speed, any P1N/P1E displacement between them is
+  // pure GPS position jitter (a moored ship's antenna fix wobbling by a few
+  // meters), not real travel — letting that drive `course` via the
+  // derivative below would turn that noise into an arbitrarily swinging
+  // heading mid-segment for a vessel that's actually just sitting still
+  // (it's pinned correctly exactly at the fixes regardless, since the
+  // tangent terms vanish there — only strictly between them does the noise
+  // leak in). Skip the derivative entirely in that case.
+  const stoppedBoth = Math.hypot(seg.V0N, seg.V0E) < 1e-6 && Math.hypot(seg.V1N, seg.V1E) < 1e-6;
+  let course;
+  if (stoppedBoth) {
+    course = u < 0.5 ? seg.c0 : seg.c1;
+  } else {
+    const d = hermiteBasisDeriv(u);
+    const velN = (d.m0 * seg.T * seg.V0N + d.p1 * seg.P1N + d.m1 * seg.T * seg.V1N) / seg.T;
+    const velE = (d.m0 * seg.T * seg.V0E + d.p1 * seg.P1E + d.m1 * seg.T * seg.V1E) / seg.T;
+    // Falls back to the nearest endpoint's course when the ship isn't moving
+    // (zero tangent — e.g. stopped at both ends), where direction-of-travel
+    // is undefined.
+    course = Math.hypot(velN, velE) > 1e-6
+      ? (Math.atan2(velE, velN) * 180 / Math.PI + 360) % 360
+      : (u < 0.5 ? seg.c0 : seg.c1);
+  }
   const crab = seg.crab0 + seg.crabDelta * u;
   const heading = (course + crab + 360) % 360;
   return { lat, lon, heading, course, headingKnown: seg.headingKnown };
@@ -567,14 +589,14 @@ function pushTicks(marks, wp, lengthM, color, opacity, mmsi) {
 function popupRow(label, value) {
   return `<div class="popup-row"><span class="popup-label">${label}</span><span class="popup-value">${value}</span></div>`;
 }
-function haversineNM(aLat, aLon, bLat, bLon) {
+export function haversineNM(aLat, aLon, bLat, bLon) {
   const R = 6371000;
   const φ1 = aLat * Math.PI / 180, φ2 = bLat * Math.PI / 180;
   const dφ = (bLat - aLat) * Math.PI / 180, dλ = (bLon - aLon) * Math.PI / 180;
   const x = Math.sin(dφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(dλ / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(x)) / 1852;
 }
-function fmtNM(nm) {
+export function fmtNM(nm) {
   const r = Math.round(nm * 10) / 10;
   return Number.isInteger(r) ? r.toFixed(0) : r.toFixed(1);
 }
@@ -596,6 +618,21 @@ function adjacentFixGaps(history, idx) {
 function previousFixGaps(history, idx) {
   return `${fixGap(history, idx - 4, idx - 3)}${fixGap(history, idx - 3, idx - 2)}${fixGap(history, idx - 2, idx - 1)}${fixGap(history, idx - 1, idx)} THIS`;
 }
+// The time-window/onMap half of "would this fix currently get a circle on
+// the map" (see reconcileFixCircles call sites: the smooth-motion loop
+// above, and the live trail in visibility.js's refreshTrail) — used by the
+// AIS Fixes side panel (fixesPanel.js), which always lists a selected
+// vessel's fixes for inspection regardless of the separate "Show AIS fixes"
+// toggle (filterState.showFixes only controls the on-map circles).
+export function isFixInPanelRange(ship, ts) {
+  if (!ship.onMap) return false;
+  if (smoothMotionState.enabled) {
+    const targetTs = targetTimestamp();
+    return ts >= targetTs - filterState.trailSec * 1000 && ts <= targetTs + filterState.leadSec * 1000;
+  }
+  return ts >= Date.now() - filterState.trailSec * 1000;
+}
+
 // The fix-gap line for a whole ship, showing the 4 intervals BEFORE the fix
 // at/just before the instant the marker is currently showing (live → now,
 // smooth motion → the lagged instant).
@@ -639,7 +676,7 @@ export function buildFixPopup(mmsi, ts) {
     ${popupRow('AIS HDG', hdgStr)}
     <div class="legend-hint">Map ticks: solid black = COG, dashed = HDG</div>
     ${popupRow('Mag. decl.', decStr)}
-    ${popupRow('Speed', `${f.sog ?? '—'} kn`)}
+    ${popupRow('Speed', `${f.sog != null ? f.sog.toFixed(1) : '—'} kn`)}
     ${popupRow('Position (middle)', `lat=${f.lat.toFixed(5)} lon=${f.lon.toFixed(5)}`)}
     <div class="popup-fixgaps"><span class="popup-label">Fix intervals</span><br>${adjacentFixGaps(history, idx)}</div>
   `;
@@ -682,6 +719,37 @@ export function removeFixCircles(ship) {
 export const PAST_TRAIL_OPACITY = 0.45; // the observed (smoothed) past track
 export const LEAD_TRAIL_OPACITY = 0.2;  // more transparent than the past — it's a projection, not where the ship has been
 
+// While the user is actively dragging/zooming the map, Leaflet repositions
+// everything already on the map for free (a single CSS transform on the
+// shared panes) — no per-layer work needed. The expensive part is this
+// loop's own per-ship work below (marker/icon/trail/tick/fix-circle
+// updates, 10x/second, for every ship), which keeps running regardless of
+// interaction and competes with the browser for the same frame budget,
+// which is exactly when it's most visible as jank. So: do none of that
+// work at all while interacting — every position is a pure function of
+// elapsed real time (no per-tick accumulation), so nothing drifts; it
+// simply resumes exactly where it should be the instant the gesture ends.
+let interacting = false;
+map.on('movestart zoomstart', () => { interacting = true; });
+map.on('moveend zoomend', () => { interacting = false; });
+
+// AIS-fix circles (and their popups) are real interactive layers, each
+// independently positioned by Leaflet — hidden outright while panning so
+// there's nothing for Leaflet to reposition/repaint per fix per ship during
+// the drag, not just visually faded. Restored the instant the gesture ends,
+// before the next loop tick even runs (which would otherwise recreate them).
+function setAllFixCirclesHidden(hidden) {
+  for (const ship of ships.values()) {
+    if (!ship.fixCircles) continue;
+    for (const m of ship.fixCircles.values()) {
+      if (hidden && map.hasLayer(m)) m.remove();
+      else if (!hidden && !map.hasLayer(m)) m.addTo(map);
+    }
+  }
+}
+map.on('movestart zoomstart', () => setAllFixCirclesHidden(true));
+map.on('moveend zoomend', () => setAllFixCirclesHidden(false));
+
 // Updates marker positions 10x/second while smooth motion is on, so motion
 // looks continuous rather than ticking once per second. Also draws, ahead of
 // the marker, the planned "lead" track for the next `getLeadSec()`
@@ -692,7 +760,7 @@ export const LEAD_TRAIL_OPACITY = 0.2;  // more transparent than the past — it
 // colour as the live-mode trail — with the lead drawn more transparently.
 export function startSmoothMotionLoop(getTrailSec, getLeadSec, getShowFixes) {
   setInterval(() => {
-    if (!smoothMotionState.enabled) return;
+    if (!smoothMotionState.enabled || interacting) return;
     const targetTs = targetTimestamp();
     for (const [mmsi, ship] of ships) {
       const sd = staticData.get(mmsi);
@@ -782,17 +850,12 @@ export function startSmoothMotionLoop(getTrailSec, getLeadSec, getShowFixes) {
         removePastTrail(ship);
       }
 
-      // The newest real report can fall outside BOTH the trail and lead
-      // windows (e.g. a large smooth-motion delta with a much shorter lead)
-      // — it'd then never get a circle at all, with no way to click it. It's
-      // the single most relevant fix (where the ship actually, really is
-      // right now), so always make it clickable regardless of window size.
-      if (showFixes && ship.history.length) {
-        const newest = ship.history[ship.history.length - 1];
-        if (!fixSet.has(newest.ts)) {
-          fixSet.set(newest.ts, { lat: newest.lat, lon: newest.lon, opacity: newest.ts > targetTs ? LEAD_TRAIL_OPACITY : PAST_TRAIL_OPACITY });
-        }
-      }
+      // fixSet only ever contains waypoints from the lead/past windows above
+      // (both gated on ship.onMap) — so a fix only ever shows up here when
+      // the vessel is currently shown AND its age falls between
+      // delta-lead and delta+trail. No exception for the newest real
+      // report: if it falls outside both windows, it simply doesn't get a
+      // circle, same as any other out-of-range fix.
       reconcileFixCircles(ship, mmsi, fixSet, trailColor);
     }
   }, 100);

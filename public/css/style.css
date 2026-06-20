@@ -44,12 +44,72 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
   position: fixed; left: 10px; bottom: 10px; z-index: 1000;
   background: var(--color-legend-bg); border: 1px solid var(--color-border); border-radius: 6px;
   padding: 4px 10px; font-size: 11px; color: var(--color-text);
-  pointer-events: none; opacity: 0; transition: opacity 0.4s;
+  /* pointer-events needs to be enabled for its hover tooltip (title attr,
+     set in storage.js) to fire at all — it's a small fixed box in the
+     corner, so it doesn't meaningfully get in the way of the map under it. */
+  opacity: 0; transition: opacity 0.4s;
 }
-.storage-indicator.visible { opacity: 1; }
+.storage-indicator.visible { opacity: 1; pointer-events: auto; }
 .storage-indicator.error { color: var(--color-warn); }
 .storage-indicator.busy { color: var(--color-accent); }
 #map { flex: 1; }
+
+/* Shown on beforeunload/pagehide (closing, reloading, navigating away) while
+   the final synchronous save runs — covers the whole viewport since the
+   save briefly blocks the main thread anyway, so nothing else is interactive
+   underneath it for that moment. */
+.unload-banner {
+  position: fixed; inset: 0; z-index: 999999;
+  display: none; align-items: center; justify-content: center;
+  background: var(--color-bg); color: var(--color-text);
+  font-size: 18px; font-family: sans-serif; text-align: center; padding: 20px;
+}
+/* Pre-built and already in the DOM (see main.js) — toggling this class at
+   unload time is just a style flip, not an element creation, so there's
+   nothing left to do but show it the instant the event fires. */
+.unload-banner.visible { display: flex; }
+
+/* AIS Fixes side panel — opened only via the button inside a vessel's popup
+   (popup.js), never a standalone toggle. Three states (fixesPanel.js):
+   closed (fully hidden, default), open (slid fully into view), minimized
+   (slid back out, leaving only the small reopen tab below visible). */
+.fixes-panel {
+  position: fixed; top: 0; right: -360px; bottom: 0; width: 360px; z-index: 1500;
+  background: var(--color-panel-bg); border-left: 1px solid var(--color-border);
+  display: flex; flex-direction: column;
+  transition: right 0.25s; font-size: 12px; color: var(--color-text);
+}
+.fixes-panel.open { right: 0; }
+.fixes-panel-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; font-weight: 600; font-size: 13px; color: var(--color-accent);
+  border-bottom: 1px solid var(--color-border); flex-shrink: 0;
+}
+.fixes-panel-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fixes-panel-min, .fixes-panel-close {
+  flex-shrink: 0; background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
+  color: var(--color-text); width: 22px; height: 22px; line-height: 1; font-size: 12px; cursor: pointer;
+}
+.fixes-panel-min:hover, .fixes-panel-close:hover { background: var(--color-border); }
+.fixes-panel-body { padding: 8px 14px; overflow-y: auto; flex: 1; }
+/* Shown only while minimized — same corner the panel itself slides in from. */
+.fixes-panel-reopen {
+  position: fixed; top: 10px; right: 10px; z-index: 1500; display: none;
+  background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
+  color: var(--color-text); padding: 5px 10px; font-size: 12px; cursor: pointer;
+}
+.fixes-panel-reopen.visible { display: block; }
+.fixes-panel-reopen:hover { background: var(--color-border); }
+.fixes-header-row, .fixes-row {
+  display: grid; grid-template-columns: 1.3fr 0.8fr 0.8fr 0.8fr 0.8fr; gap: 6px;
+  padding: 3px 0;
+}
+.fixes-header-row { color: var(--color-text-secondary); font-weight: 600; border-bottom: 1px solid var(--color-border); margin-bottom: 4px; }
+.fixes-interval {
+  text-align: center; color: var(--color-text-secondary); font-size: 11px;
+  padding: 2px 0; font-family: ui-monospace, monospace;
+}
+.fixes-empty { color: var(--color-text-secondary); padding: 10px 0; }
 
 /* Ship marker hit-testing: the divIcon's bounding box is often much larger
    than the visible shape (esp. to-scale hulls with a speed-dot trail), which
@@ -72,8 +132,16 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 .popup-row { display: flex; margin: .3em 0; justify-content: space-between; gap: 20px; }
 .popup-label { color: var(--color-text-secondary); line-height: 1.2em; }
 .popup-value { color: var(--color-text); font-weight: 500; text-align: right; line-height: 1.2em; }
+.popup-value a { color: var(--color-accent); }
 .popup-warn { color: var(--color-warn); font-weight: 600; }
+.popup-sep { border-top: 1px solid var(--color-border); margin: 7px 0; }
 .popup-fixgaps { margin-top: 8px; font-family: ui-monospace, monospace; font-size: 11px; color: var(--color-accent); line-height: 1.5; word-break: break-word; }
+.popup-fixes-row { margin-top: 8px; display: flex; justify-content: flex-end; }
+.popup-fixes-btn {
+  background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
+  color: var(--color-text); padding: 4px 9px; font-size: 11px; cursor: pointer;
+}
+.popup-fixes-btn:hover { background: var(--color-border); }
 
 /* Ship name labels */
 .leaflet-tooltip.ship-label {

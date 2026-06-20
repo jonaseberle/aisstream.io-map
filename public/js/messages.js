@@ -4,10 +4,11 @@ import { CATEGORIES, shipCategory, shipTypeLabel } from './categories.js';
 import { shipIcon } from './icons.js';
 import { resolveHeading, cogBad, bestHeading } from './heading.js';
 import { SPOOF_SPEED_KNOTS, haversineKnots } from './spoof.js';
-import { applyVisibility, refreshTrail, isFloatingNow, filterState } from './visibility.js';
+import { applyVisibility, refreshTrail, isFloatingNow, filterState, MAX_TRAIL_SLIDER_SEC } from './visibility.js';
 import { buildPopup, refreshPopupIfOpen } from './popup.js';
-import { smoothMotionState } from './smoothMotion.js';
+import { smoothMotionState, MAX_DELTA_SECONDS } from './smoothMotion.js';
 import { destinationPoint, shipMiddlePosition } from './geo.js';
+import { setFixesPanelShip } from './fixesPanel.js';
 
 // Gap (m) between the hull's geometric middle and its name label, offset to
 // starboard and rotated around the middle as heading changes — so the label
@@ -19,15 +20,29 @@ const LABEL_OFFSET_M = 10;
 // often arrives after the first position report, so this needs to be
 // refreshed independently of marker creation — and again whenever onMap or
 // the middle position changes.
-export function updateLabel(mmsi) {
+//
+// Each permanent tooltip listens for the map's move/zoom events to keep
+// itself positioned, so with hundreds of ships, off-screen labels still cost
+// something on every pan/zoom. Restricted to ships currently within the
+// visible map area, so the off-screen majority never gets a tooltip at all.
+//
+// labelsSuppressed (true while panning/zooming, and through the settle-wait
+// after) overrides all of that — without it, a single incoming AIS message
+// for some ship during an active drag would call updateLabel() for just
+// that ship and recreate its tooltip mid-gesture, even though
+// hideAllLabels() just removed everything.
+let labelsSuppressed = false;
+
+function drawLabel(mmsi) {
   const ship = ships.get(mmsi);
   if (!ship) return;
   const name = filterState.showLabels ? (staticData.get(mmsi)?.name || ship.data.name || null) : null;
-  if (!name || !ship.onMap) {
+  const middle = ship.middle || [ship.data.lat, ship.data.lon];
+  const visible = !labelsSuppressed && name && ship.onMap && map.getBounds().contains(middle);
+  if (!visible) {
     if (ship.label) { ship.label.remove(); ship.label = null; }
     return;
   }
-  const middle = ship.middle || [ship.data.lat, ship.data.lon];
   const heading = ship.lastGoodHeading;
   const labelPos = Number.isFinite(heading) ? destinationPoint(middle[0], middle[1], heading + 90, LABEL_OFFSET_M) : middle;
   if (ship.label) {
@@ -37,6 +52,71 @@ export function updateLabel(mmsi) {
     ship.label = L.tooltip(labelPos, { permanent: true, direction: 'center', className: 'ship-label', interactive: false })
       .setContent(name).addTo(map);
   }
+}
+
+// Single-ship label update, for whenever just that ship's own data changes
+// (new report, its visibility flipping, etc) — drawn immediately, not via
+// the batch queue below (one ship is cheap regardless).
+export function updateLabel(mmsi) {
+  drawLabel(mmsi);
+}
+
+// Full recompute of which ships should currently have a label — used after a
+// pan/zoom settles (the visible set changed) or when "Show labels" is
+// switched on for the whole fleet. Spread across several ticks instead of
+// drawing every ship synchronously in one go, so toggling/panning doesn't
+// stall the main thread on a fleet-wide tooltip-creation burst.
+const LABEL_BATCH_SIZE = 30;
+const LABEL_BATCH_INTERVAL_MS = 1000;
+// How long to wait after a pan/zoom settles before labels start coming
+// back at all — gives the user room to immediately start another pan/zoom
+// without labels flickering back in between gestures.
+const PAN_ZOOM_LABEL_DEBOUNCE_MS = 5000;
+let labelQueue = [];
+let labelTimer = null;
+let panZoomDebounceTimer = null;
+
+function processLabelQueue() {
+  const batch = labelQueue.splice(0, LABEL_BATCH_SIZE);
+  for (const mmsi of batch) drawLabel(mmsi);
+  labelTimer = labelQueue.length ? setTimeout(processLabelQueue, LABEL_BATCH_INTERVAL_MS) : null;
+}
+
+// Immediate recompute — used when something other than a pan/zoom changes
+// the visible set (e.g. "Show ship name labels" being switched on), where
+// waiting out the pan/zoom debounce below would feel unresponsive.
+export function scheduleLabelRecompute() {
+  labelsSuppressed = false;
+  labelQueue = [...ships.keys()];
+  if (!labelTimer) processLabelQueue();
+}
+
+// While actively dragging/zooming, drop all labels outright rather than pay
+// for Leaflet repositioning every permanent tooltip on each intermediate move
+// event, and cancel any pending post-gesture recompute — if another
+// gesture starts within the debounce window, labels should stay hidden
+// rather than flash back in between. labelsSuppressed also blocks any
+// single-ship updateLabel() call (e.g. from an incoming AIS message) from
+// recreating a label while this is in effect.
+export function hideAllLabels() {
+  labelsSuppressed = true;
+  clearTimeout(panZoomDebounceTimer);
+  panZoomDebounceTimer = null;
+  labelQueue = [];
+  if (labelTimer) { clearTimeout(labelTimer); labelTimer = null; }
+  for (const ship of ships.values()) {
+    if (ship.label) { ship.label.remove(); ship.label = null; }
+  }
+}
+
+function debouncedLabelRecompute() {
+  clearTimeout(panZoomDebounceTimer);
+  panZoomDebounceTimer = setTimeout(scheduleLabelRecompute, PAN_ZOOM_LABEL_DEBOUNCE_MS);
+}
+
+export function initLabelViewport() {
+  map.on('movestart zoomstart', hideAllLabels);
+  map.on('moveend zoomend', debouncedLabelRecompute);
 }
 
 export function refreshIcon(mmsi) {
@@ -106,6 +186,33 @@ export function flushMessageQueue() {
     if (ship) refreshTrail(ship);
   }
   dirtyShips.clear();
+}
+
+// Nothing on screen (or in a save) ever needs a fix older than the furthest
+// back smooth motion can look (MAX_DELTA_SECONDS) plus the longest the
+// "Trail" slider can stretch (MAX_TRAIL_SLIDER_SEC) — both are hard slider
+// ceilings, not the live filterState values, so this only ever discards
+// fixes nothing could currently display even at max settings. Runs every
+// tick of the same flush loop as flushMessageQueue (see main.js), for every
+// ship — not just the dirty ones — since a vessel that's stopped reporting
+// still has aging fixes sitting in memory.
+//
+// Computed inside the function (not as a module-level const) — messages.js
+// and smoothMotion.js import from each other, and evaluating
+// MAX_DELTA_SECONDS at messages.js's own top level can run before
+// smoothMotion.js has finished initializing it, depending on which module
+// loads first.
+export function pruneOldFixes() {
+  const cutoff = Date.now() - (MAX_DELTA_SECONDS + MAX_TRAIL_SLIDER_SEC) * 1000;
+  for (const ship of ships.values()) {
+    while (ship.timestamps.length && ship.timestamps[0] < cutoff) {
+      ship.timestamps.shift();
+      ship.positions.shift();
+    }
+    while (ship.history.length && ship.history[0].ts < cutoff) {
+      ship.history.shift();
+    }
+  }
 }
 
 // ── Message handling ──────────────────────────────────────────────────────
@@ -240,6 +347,7 @@ export function updateShip(msg) {
       L.DomEvent.stopPropagation(e);
       marker.getPopup().setContent(buildPopup(mmsi));
       marker.openPopup();
+      setFixesPanelShip(mmsi);
     });
     const spoofSuspected = data.sog > SPOOF_SPEED_KNOTS;
     if (spoofSuspected) trail.setStyle({ color: '#ff4444' });
