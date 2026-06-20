@@ -1,5 +1,6 @@
 import './settings.js'; // load saved UI settings before building controls below
-import { map, MAP_SOURCES, setMapSource } from './map.js';
+import { MAP_SOURCES, setMapSource } from './map.js';
+import { registerTab } from './sidePanel.js';
 import { ships } from './state.js';
 import { CATEGORIES, CATEGORY_TYPES, SHIP_TYPES } from './categories.js';
 import { shapeSvgInner } from './icons.js';
@@ -9,9 +10,13 @@ import { scheduleLabelRecompute, refreshIcon } from './messages.js';
 import { saveSettings } from './settings.js';
 
 // ── Legend ───────────────────────────────────────────────────────────────
-const AisLegend = L.Control.extend({
-  onAdd() {
-    const div = L.DomUtil.create('div', 'ais-legend');
+// Builds the settings/filter panel content — used to be the content of an
+// L.Control docked in the map's bottomright corner; now it's the body of a
+// fly-in panel (see the bottom of this file) instead, same as the AIS Fixes
+// panel, so it can be tucked away without permanently occupying map space.
+function buildLegendContent() {
+    const div = document.createElement('div');
+    div.className = 'ais-legend';
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
 
@@ -509,7 +514,9 @@ const AisLegend = L.Control.extend({
     for (const slider of content.querySelectorAll('input[type=range]')) addSteppers(slider);
 
     return div;
-  },
-});
+}
 
-new AisLegend({ position: 'bottomright' }).addTo(map);
+// Settings is a permanent, non-closable tab in the shared side panel (see
+// sidePanel.js) — it's always there, unlike AIS Fixes (fixesPanel.js),
+// which only appears once a vessel's been clicked and can be closed again.
+registerTab('settings', 'Settings', buildLegendContent());

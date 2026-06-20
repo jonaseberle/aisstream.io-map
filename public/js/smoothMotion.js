@@ -1,10 +1,10 @@
 import { map } from './map.js';
-import { ships, staticData } from './state.js';
+import { ships, staticData, NAV_STATUS } from './state.js';
 import { shipIcon, pixelsPerMeter, speedDotZoomFactor, SPEED_DOT_SPACING } from './icons.js';
 import { bestHeading, bestCourse, cogBad, hdgBad, resolveHeading } from './heading.js';
 import { saveSettings } from './settings.js';
 import { updateLabel } from './messages.js';
-import { filterState, isShipMoving } from './visibility.js';
+import { filterState, isShipMoving, navStatusUnreliable } from './visibility.js';
 
 // "Smooth motion" trades immediacy for smoothness: instead of snapping each
 // marker to its latest reported position the instant a message arrives, it
@@ -589,6 +589,9 @@ function pushTicks(marks, wp, lengthM, color, opacity, mmsi) {
 function popupRow(label, value) {
   return `<div class="popup-row"><span class="popup-label">${label}</span><span class="popup-value">${value}</span></div>`;
 }
+function warn(text) {
+  return `<span class="popup-warn">${text}</span>`;
+}
 export function haversineNM(aLat, aLon, bLat, bLon) {
   const R = 6371000;
   const φ1 = aLat * Math.PI / 180, φ2 = bLat * Math.PI / 180;
@@ -618,19 +621,14 @@ function adjacentFixGaps(history, idx) {
 function previousFixGaps(history, idx) {
   return `${fixGap(history, idx - 4, idx - 3)}${fixGap(history, idx - 3, idx - 2)}${fixGap(history, idx - 2, idx - 1)}${fixGap(history, idx - 1, idx)} THIS`;
 }
-// The time-window/onMap half of "would this fix currently get a circle on
-// the map" (see reconcileFixCircles call sites: the smooth-motion loop
-// above, and the live trail in visibility.js's refreshTrail) — used by the
-// AIS Fixes side panel (fixesPanel.js), which always lists a selected
-// vessel's fixes for inspection regardless of the separate "Show AIS fixes"
-// toggle (filterState.showFixes only controls the on-map circles).
-export function isFixInPanelRange(ship, ts) {
-  if (!ship.onMap) return false;
-  if (smoothMotionState.enabled) {
-    const targetTs = targetTimestamp();
-    return ts >= targetTs - filterState.trailSec * 1000 && ts <= targetTs + filterState.leadSec * 1000;
-  }
-  return ts >= Date.now() - filterState.trailSec * 1000;
+// Used by the AIS Fixes side panel (fixesPanel.js), which lists ALL of a
+// selected vessel's stored fixes for inspection — unbounded by the
+// trail/lead sliders (as if no trail were set at all) and independent of
+// the separate "Show AIS fixes" toggle (filterState.showFixes only controls
+// the on-map circles). Still requires the vessel itself be currently shown,
+// same as the map's own fix circles.
+export function isFixInPanelRange(ship) {
+  return ship.onMap;
 }
 
 // The fix-gap line for a whole ship, showing the 4 intervals BEFORE the fix
@@ -668,15 +666,18 @@ export function buildFixPopup(mmsi, ts) {
   const corrected = usesHdg && f.declination != null
     ? ` → ${((f.hdg + f.declination + 360) % 360).toFixed(1)}° true` : '';
   const hdgStr = `${hdgVal}${corrected}${usesHdg ? ' ← rotation' : ''}`;
+  const navLabel = NAV_STATUS[f.navStatus] ?? 'Unknown';
+  const navUnreliable = navStatusUnreliable(f.sog, f.navStatus);
   return `
     <div class="popup-name">${name}</div>
     ${popupRow('MMSI', mmsi)}
     ${popupRow('Fix time', new Date(f.ts).toISOString())}
-    ${popupRow('AIS COG', cogStr)}
-    ${popupRow('AIS HDG', hdgStr)}
+    ${popupRow('Speed', `${f.sog != null ? f.sog.toFixed(1) : '—'} kn`)}
+    ${popupRow('Course', cogStr)}
+    ${popupRow('Heading (mag.)', hdgStr)}
     <div class="legend-hint">Map ticks: solid black = COG, dashed = HDG</div>
     ${popupRow('Mag. decl.', decStr)}
-    ${popupRow('Speed', `${f.sog != null ? f.sog.toFixed(1) : '—'} kn`)}
+    ${popupRow('Nav status', `${f.navStatus} (${navLabel})${navUnreliable ? ' ' + warn('⚠ unreliable (sog ≥ 0.5kn)') : ''}`)}
     ${popupRow('Position (middle)', `lat=${f.lat.toFixed(5)} lon=${f.lon.toFixed(5)}`)}
     <div class="popup-fixgaps"><span class="popup-label">Fix intervals</span><br>${adjacentFixGaps(history, idx)}</div>
   `;

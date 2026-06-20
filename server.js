@@ -23,6 +23,24 @@ if (!API_KEY) {
   process.exit(1);
 }
 
+// Vendored front-end deps (Leaflet, lz-string) are served from disk rather
+// than a CDN — copied here from node_modules on every startup instead of
+// committed, so public/dist/ stays in .gitignore and always matches
+// whatever's actually installed (package.json/package-lock.json is the
+// source of truth, not a second copy of the files).
+function vendorAssets() {
+  const dist = path.join(__dirname, 'public', 'dist');
+  fs.mkdirSync(dist, { recursive: true });
+  fs.cpSync(path.join(__dirname, 'node_modules', 'leaflet', 'dist'), path.join(dist, 'leaflet'), { recursive: true });
+  fs.mkdirSync(path.join(dist, 'lz-string'), { recursive: true });
+  fs.copyFileSync(
+    path.join(__dirname, 'node_modules', 'lz-string', 'libs', 'lz-string.min.js'),
+    path.join(dist, 'lz-string', 'lz-string.min.js')
+  );
+  log('Vendored Leaflet + lz-string into public/dist/');
+}
+vendorAssets();
+
 const app = express();
 app.use(express.static(path.join(__dirname, 'public'), {
   etag: false,

@@ -1,49 +1,52 @@
 import { ships, staticData } from './state.js';
 import { isFixInPanelRange, haversineNM, fmtNM } from './smoothMotion.js';
+import { registerTab, setTabVisible, openSidePanel } from './sidePanel.js';
 
-// Side panel listing a selected vessel's AIS fixes within the same
-// time/onMap window the map's own fix circles use (isFixInPanelRange) —
-// but always, regardless of the separate "Show AIS fixes" toggle, since
-// this is a debugging aid for inspecting a vessel's raw fixes, not tied to
-// whether the on-map circles happen to be switched on. Opened only via the
-// "AIS Fixes ›" button inside the vessel popup (popup.js) — there's no
-// standalone toggle for it.
+// AIS Fixes tab in the shared side panel (sidePanel.js) — lists ALL of a
+// selected vessel's stored AIS fixes, not bounded by the trail/lead sliders
+// (as if no trail were set at all) and independent of the separate "Show
+// AIS fixes" toggle, since this is a debugging aid for inspecting a
+// vessel's raw fixes, not a reflection of what's drawn on the map. Still
+// requires the vessel itself be currently shown (isFixInPanelRange).
+// Unlike Settings, this tab starts hidden and only appears (closable) once
+// the "AIS Fixes ›" button inside a vessel popup (popup.js) is clicked.
 let selectedMmsi = null;
-let panelEl = null;
-let headerEl = null;
+let titleEl = null;
 let bodyEl = null;
-let reopenTabEl = null;
-// 'closed' — fully hidden, no trace on screen (initial state).
-// 'open' — slid fully into view.
-// 'minimized' — slid back out, leaving only reopenTabEl (a small fixed tab)
-// visible, so the panel isn't blocking the map but is still one click away.
-let state = 'closed';
+let tabShown = false;
 
 function fmtDeg(v) {
   return v != null ? `${v.toFixed(1)}°` : '—';
+}
+
+// Z (UTC) time, not the browser's local timezone — every displayed time in
+// this project is Z, so a fix here is directly comparable to one in the
+// vessel popup or server debug.log without a mental timezone conversion.
+function fmtTimeZ(ts) {
+  return `${new Date(ts).toISOString().slice(11, 23)}Z`;
 }
 
 function renderFixesPanel() {
   if (!bodyEl) return;
   const ship = selectedMmsi ? ships.get(selectedMmsi) : null;
   if (!ship) {
-    headerEl.textContent = 'AIS Fixes';
+    titleEl.textContent = '';
     bodyEl.innerHTML = '<div class="fixes-empty">Click a vessel to inspect its fixes.</div>';
     return;
   }
   const sd = staticData.get(selectedMmsi);
-  headerEl.textContent = `AIS Fixes — ${sd?.name || ship.data?.name || selectedMmsi}`;
+  titleEl.textContent = sd?.name || ship.data?.name || selectedMmsi;
 
-  const visible = ship.history.filter((h) => isFixInPanelRange(ship, h.ts));
+  const visible = isFixInPanelRange(ship) ? ship.history : [];
   if (!visible.length) {
-    bodyEl.innerHTML = '<div class="fixes-empty">No fixes in range for this vessel right now.</div>';
+    bodyEl.innerHTML = '<div class="fixes-empty">Vessel isn’t currently shown on the map.</div>';
     return;
   }
   let html = `<div class="fixes-header-row"><span>Time</span><span>SOG</span><span>COG</span><span>HDG</span><span>Decl.</span></div>`;
   for (let i = 0; i < visible.length; i++) {
     const f = visible[i];
     html += `<div class="fixes-row">
-      <span>${new Date(f.ts).toLocaleTimeString()}</span>
+      <span>${fmtTimeZ(f.ts)}</span>
       <span>${f.sog != null ? f.sog.toFixed(1) : '—'}</span>
       <span>${fmtDeg(f.cog)}</span>
       <span>${f.hdg === 511 ? '—' : fmtDeg(f.hdg)}</span>
@@ -60,59 +63,51 @@ function renderFixesPanel() {
 }
 
 // Called from each marker's click handler (messages.js, storage.js) — same
-// moment the vessel popup opens, so the panel (if open) already tracks
-// whichever vessel was last clicked, without forcing it open.
+// moment the vessel popup opens, so the tab (if currently shown) already
+// tracks whichever vessel was last clicked, without forcing it open.
 export function setFixesPanelShip(mmsi) {
   selectedMmsi = mmsi;
-  if (state === 'open') renderFixesPanel();
-}
-
-function setState(next) {
-  state = next;
-  panelEl.classList.toggle('open', state === 'open');
-  reopenTabEl.classList.toggle('visible', state === 'minimized');
-  if (state === 'open') renderFixesPanel();
+  if (tabShown) renderFixesPanel();
 }
 
 // Used by the popup's own "AIS Fixes ›" button (popup.js) — selects that
-// vessel AND opens the panel outright, unlike setFixesPanelShip above which
-// only updates the selection if the panel already happens to be open.
+// vessel, reveals the (closable) tab if it was hidden, and switches the
+// shared side panel to it outright. setFixesPanelShip above, by contrast,
+// only updates the selection if the tab already happens to be visible.
 export function openFixesPanel(mmsi) {
   selectedMmsi = mmsi;
-  setState('open');
+  tabShown = true;
+  setTabVisible('fixes', true);
+  openSidePanel('fixes');
+  renderFixesPanel();
 }
 
 // Called periodically (main.js) so the list keeps up with the lead/trail
-// window sliding forward and new fixes arriving, while the panel is open.
+// window sliding forward and new fixes arriving, while the tab is shown.
 export function refreshFixesPanel() {
-  if (state === 'open') renderFixesPanel();
+  if (tabShown) renderFixesPanel();
 }
 
 export function initFixesPanel() {
-  panelEl = document.createElement('div');
-  panelEl.id = 'fixes-panel';
-  panelEl.className = 'fixes-panel';
-  panelEl.innerHTML = `
-    <div class="fixes-panel-header">
-      <span class="fixes-panel-title"></span>
-      <button type="button" class="fixes-panel-min" title="Minimize">─</button>
-      <button type="button" class="fixes-panel-close" title="Close">✕</button>
-    </div>
-    <div class="fixes-panel-body"></div>`;
-  document.body.appendChild(panelEl);
-  headerEl = panelEl.querySelector('.fixes-panel-title');
-  bodyEl = panelEl.querySelector('.fixes-panel-body');
-  headerEl.textContent = 'AIS Fixes';
-  panelEl.querySelector('.fixes-panel-min').addEventListener('click', () => setState('minimized'));
-  panelEl.querySelector('.fixes-panel-close').addEventListener('click', () => setState('closed'));
+  bodyEl = document.createElement('div');
+  bodyEl.className = 'fixes-panel-body';
 
-  reopenTabEl = document.createElement('button');
-  reopenTabEl.type = 'button';
-  reopenTabEl.id = 'fixes-panel-reopen';
-  reopenTabEl.className = 'fixes-panel-reopen';
-  reopenTabEl.textContent = 'AIS Fixes ‹';
-  reopenTabEl.addEventListener('click', () => setState('open'));
-  document.body.appendChild(reopenTabEl);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'fixes-panel';
+  const titleRow = document.createElement('div');
+  titleRow.className = 'fixes-panel-title';
+  wrapper.appendChild(titleRow);
+  wrapper.appendChild(bodyEl);
+  titleEl = titleRow;
+
+  // onHide fires when the tab bar's own close button (or anything else)
+  // hides this tab — flips tabShown off so refreshFixesPanel/
+  // setFixesPanelShip stop re-rendering into a tab nobody can see.
+  registerTab('fixes', 'AIS Fixes', wrapper, {
+    closable: true,
+    visible: false,
+    onHide: () => { tabShown = false; },
+  });
 
   // Delegated (rather than bound per-popup) since Leaflet rebuilds the
   // popup's DOM from the HTML string every time buildPopup() re-renders it —

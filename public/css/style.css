@@ -69,37 +69,55 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
    nothing left to do but show it the instant the event fires. */
 .unload-banner.visible { display: flex; }
 
-/* AIS Fixes side panel — opened only via the button inside a vessel's popup
-   (popup.js), never a standalone toggle. Three states (fixesPanel.js):
-   closed (fully hidden, default), open (slid fully into view), minimized
-   (slid back out, leaving only the small reopen tab below visible). */
-.fixes-panel {
-  position: fixed; top: 0; right: -360px; bottom: 0; width: 360px; z-index: 1500;
+/* Shared side fly-in (sidePanel.js) — holds Settings and AIS Fixes as tabs
+   instead of two separate panels that would otherwise stack exactly on top
+   of each other (both full-height, same right edge). Starts open; the
+   header's "›" tucks the whole thing away into the small reopen tab below. */
+.side-flyin {
+  position: fixed; top: 0; right: -380px; bottom: 0; width: 360px; z-index: 1500;
   background: var(--color-panel-bg); border-left: 1px solid var(--color-border);
   display: flex; flex-direction: column;
   transition: right 0.25s; font-size: 12px; color: var(--color-text);
 }
-.fixes-panel.open { right: 0; }
-.fixes-panel-header {
-  display: flex; align-items: center; gap: 8px;
-  padding: 10px 14px; font-weight: 600; font-size: 13px; color: var(--color-accent);
+.side-flyin.open { right: 0; }
+.side-flyin-header {
+  display: flex; align-items: stretch; gap: 4px;
   border-bottom: 1px solid var(--color-border); flex-shrink: 0;
 }
-.fixes-panel-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fixes-panel-min, .fixes-panel-close {
-  flex-shrink: 0; background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
+.side-tab-bar { flex: 1; display: flex; overflow: hidden; }
+.side-tab {
+  display: flex; align-items: center; gap: 6px; padding: 10px 12px;
+  font-weight: 600; font-size: 13px; color: var(--color-text-secondary); cursor: pointer;
+  border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.side-tab.active { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+.side-tab-close {
+  flex-shrink: 0; background: none; border: none; color: inherit;
+  font-size: 11px; line-height: 1; cursor: pointer; padding: 1px;
+}
+.side-tab-close:hover { color: var(--color-warn); }
+.side-flyin-min {
+  flex-shrink: 0; align-self: center; margin-right: 8px;
+  background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
   color: var(--color-text); width: 22px; height: 22px; line-height: 1; font-size: 12px; cursor: pointer;
 }
-.fixes-panel-min:hover, .fixes-panel-close:hover { background: var(--color-border); }
-.fixes-panel-body { padding: 8px 14px; overflow-y: auto; flex: 1; }
+.side-flyin-min:hover { background: var(--color-border); }
+.side-flyin-body { flex: 1; overflow-y: auto; }
 /* Shown only while minimized — same corner the panel itself slides in from. */
-.fixes-panel-reopen {
+.side-flyin-reopen {
   position: fixed; top: 10px; right: 10px; z-index: 1500; display: none;
   background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
-  color: var(--color-text); padding: 5px 10px; font-size: 12px; cursor: pointer;
+  color: var(--color-text); width: 26px; height: 26px; font-size: 13px; cursor: pointer;
 }
-.fixes-panel-reopen.visible { display: block; }
-.fixes-panel-reopen:hover { background: var(--color-border); }
+.side-flyin-reopen.visible { display: block; }
+.side-flyin-reopen:hover { background: var(--color-border); }
+
+/* AIS Fixes tab content (fixesPanel.js) */
+.fixes-panel-title {
+  padding: 10px 14px 0; font-weight: 600; font-size: 13px; color: var(--color-accent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fixes-panel-body { padding: 8px 14px; }
 .fixes-header-row, .fixes-row {
   display: grid; grid-template-columns: 1.3fr 0.8fr 0.8fr 0.8fr 0.8fr; gap: 6px;
   padding: 3px 0;
@@ -152,11 +170,12 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 }
 .leaflet-tooltip.ship-label::before { display: none; }
 
-/* Legend */
+/* Legend — now always inside the shared side fly-in's Settings tab (see
+   .side-flyin-body above), which owns the
+   background/border/scrolling, so this just supplies its own padding. */
 .ais-legend {
-  background: var(--color-legend-bg); border: 1px solid var(--color-border); border-radius: 6px;
   padding: 10px 14px; font-size: 12px; color: var(--color-text);
-  max-height: calc(100vh - 120px); overflow-y: auto; user-select: none;
+  user-select: none;
 }
 .legend-title { font-weight: 600; color: var(--color-accent); margin-bottom: 8px; font-size: 13px; }
 .legend-group-title { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
@@ -186,9 +205,13 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 .legend-row.dimmed { opacity: 0.4; }
 /* Fixed-width digits so the live Debug-group counters don't jiggle as values change. */
 .legend-row strong { color: var(--color-accent); font-family: ui-monospace, monospace; font-variant-numeric: tabular-nums; }
-.legend-slider { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 12px; }
+/* label takes the full row (flex-basis 100%) so the slider itself — and its
+   ‹/› stepper buttons, inserted as siblings by addSteppers() — always wraps
+   onto its own line below, instead of squeezing into whatever's left next
+   to a (often long) label. */
+.legend-slider { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 12px; }
 .legend-slider input[type=range] { flex: 1; accent-color: var(--color-accent); cursor: pointer; }
-.legend-slider label { white-space: nowrap; color: var(--color-text); min-width: 70px; }
+.legend-slider label { flex: 0 0 100%; white-space: normal; color: var(--color-text); }
 .legend-step-btn {
   flex-shrink: 0; width: 18px; height: 18px; padding: 0; line-height: 1;
   background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 3px;
