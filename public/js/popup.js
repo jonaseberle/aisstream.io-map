@@ -3,6 +3,7 @@ import { bestHeading, hdgBad, cogBad } from './heading.js';
 import { SPOOF_SPEED_KNOTS } from './spoof.js';
 import { filterState, navStatusUnreliable } from './visibility.js';
 import { shipFixGaps } from './smoothMotion.js';
+import { gpsAntennaPosition } from './geo.js';
 
 function row(label, value) {
   return `<div class="popup-row"><span class="popup-label">${label}</span><span class="popup-value">${value}</span></div>`;
@@ -55,7 +56,16 @@ export function buildPopup(mmsi) {
         + row('Mag. decl.', decStr);
     })()}
     ${row('Nav status', `${d.navStatus} (${navLabel})${navUnreliable ? ' ' + warn('⚠ unreliable (sog ≥ 0.5kn)') : ''}`)}
-    ${row('Position',   `lat=${d.lat.toFixed(5)} lon=${d.lon.toFixed(5)}${ship.isFloating ? ' ' + warn('(floating)') : ''}`)}
+    ${row('Position (middle)', `lat=${d.lat.toFixed(5)} lon=${d.lon.toFixed(5)}${ship.isFloating ? ' ' + warn('(floating)') : ''}`)}
+    ${(()=>{
+      // The GPS antenna fix itself isn't stored (only the hull's middle is —
+      // see updateShip in messages.js) — recovered here on demand, only
+      // while the setting is on and there's a dim-derived offset to undo.
+      if (!filterState.showAntenna || !dim) return '';
+      const heading = bestHeading(d.cog, d.hdg, d.declination);
+      const [aLat, aLon] = gpsAntennaPosition(d.lat, d.lon, heading, dim);
+      return row('GPS antenna', `lat=${aLat.toFixed(5)} lon=${aLon.toFixed(5)}`);
+    })()}
     ${row('Trail', `${ship.positions.length} pts stored / ${filterState.trailSec}s window`)}
     ${ship.spoofSuspected ? row('⚠ Spoofing?', warn(`speed ${Math.round(ship.maxImpliedKnots)} kts (implied or reported, threshold ${SPOOF_SPEED_KNOTS} kts)`)) : ''}
     <div class="popup-fixgaps"><span class="popup-label">Fix intervals</span><br>${shipFixGaps(d.mmsi)}</div>

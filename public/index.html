@@ -8,38 +8,8 @@
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
-  <div id="header">
-    <div id="stats">
-      <span>Ships:<br><strong id="ship-count">0</strong></span>
-      <span>Messages/s:<br><strong id="msg-rate">0</strong></span>
-      <span>Moving:<br><strong id="moving-count">0</strong></span>
-      <span>Single obs.:<br><strong id="single-obs-count">0</strong></span>
-      <span>Last update interval (moving vessels):<br><strong id="avg-interval" title="p50 and p80 are percentiles: 50% (resp. 80%) of samples are at or below this value.">—</strong></span>
-      <span>unreliable/spoofed:<br><strong id="spoof-count">0</strong></span>
-      <span>localStorage:<br><strong id="storage-usage">—</strong></span>
-    </div>
-    <div id="status" style="display: flex; gap: .5em">
-      <div style="display: flex; gap: .5em">
-        <label id="smooth-motion-label"><input type="checkbox" id="smooth-motion-checkbox"> Smooth motion</label>
-        <div style="display: flex; gap: .5em; flex-direction: column">
-          <span id="smooth-motion-delta-label">300s in the past</span>
-          <div>
-            <input type="range" id="smooth-motion-slider" min="60" max="1200" step="10" value="300"><br>
-            <span id="smooth-motion-note" title="Smooth motion still respects the &quot;Max. interval&quot; filter — vessels are hidden/shown using their state at that past instant, not live.">(respects Max. interval)</span>
-          </div>
-        </div>
-      </div>
-      <label id="freeze-bounds-label" title="Stop updating the dashed bounding-box outline on the map."><input type="checkbox" id="freeze-bounds-checkbox"> Freeze bounds rect</label>
-      <div style="display: flex; flex-direction: column; gap: .5em">
-        <div>
-          <span id="status-dot" style="display: inline-block"></span>
-          <span id="status-text">Connecting…</span>
-        </div>
-        <label id="reset-settings-label" title="Reset settings"><button id="reset-settings-button">Reset settings</button></label>
-      </div>
-    </div>
-  </div>
   <div id="map"></div>
+  <div id="storage-indicator" class="storage-indicator"></div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js"></script>

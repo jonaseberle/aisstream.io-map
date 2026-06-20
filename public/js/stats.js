@@ -1,8 +1,6 @@
-import { map } from './map.js';
-import { ships, staticData } from './state.js';
-import { pixelsPerMeter, speedDotZoomFactor } from './icons.js';
+import { ships } from './state.js';
+import { speedDotZoomFactor } from './icons.js';
 import { applyVisibility, isShipVisible, isShipMoving, isFloatingNow } from './visibility.js';
-import { STORAGE_KEY_SHIPS, STORAGE_KEY_STATIC, STORAGE_KEY_META, STORAGE_QUOTA_KB, storageState } from './storage.js';
 import { refreshIcon } from './messages.js';
 import { refreshPopupIfOpen } from './popup.js';
 
@@ -16,13 +14,12 @@ export function startStatsLoop() {
     document.getElementById('msg-rate').textContent = msgCount;
     msgCount = 0;
 
-    let visibleCount = 0, movingCount = 0, singleObsCount = 0, spoofCount = 0;
+    let visibleCount = 0, movingCount = 0, singleObsCount = 0;
     const intervalSamples = [];
 
     for (const [mmsi, ship] of ships) {
       if (!ship.inBounds || !isShipVisible(mmsi)) continue;
       visibleCount++;
-      if (ship.spoofSuspected) spoofCount++;
 
       const d = ship.data;
       const isMoving = isShipMoving(d.sog);
@@ -42,7 +39,6 @@ export function startStatsLoop() {
     document.getElementById('ship-count').textContent = visibleCount;
     document.getElementById('moving-count').textContent = movingCount;
     document.getElementById('single-obs-count').textContent = singleObsCount;
-    document.getElementById('spoof-count').textContent = spoofCount;
 
     const avgEl = document.getElementById('avg-interval');
     if (intervalSamples.length === 0) {
@@ -55,21 +51,6 @@ export function startStatsLoop() {
       const p50  = intervalSamples[Math.floor(n * 0.5)];
       const p80  = intervalSamples[Math.floor(n * 0.8)];
       avgEl.textContent = `min ${fmtSec(min)} / p50 ${fmtSec(p50)} / p80 ${fmtSec(p80)} / max ${fmtSec(max)}`;
-    }
-
-    const hint = document.getElementById('dim-hint');
-    if (hint) {
-      const ppm = pixelsPerMeter(map.getCenter().lat, map.getZoom());
-      let withDim = 0, showing = 0;
-      for (const sd of staticData.values()) {
-        if (!sd?.dim) continue;
-        const lengthPx = ((sd.dim.A || 0) + (sd.dim.B || 0)) * ppm;
-        const beamPx   = ((sd.dim.C || 0) + (sd.dim.D || 0)) * ppm;
-        withDim++;
-        if (lengthPx >= 8 && beamPx >= 2) showing++;
-      }
-      const active = withDim > 0 && showing >= withDim / 2;
-      hint.classList.toggle('active', active);
     }
 
     const speedHint = document.getElementById('speed-hint');
@@ -97,16 +78,5 @@ export function startStatsLoop() {
         refreshPopupIfOpen(mmsi);
       }
     }
-
-    // localStorage usage
-    try {
-      const bytes = [STORAGE_KEY_SHIPS, STORAGE_KEY_STATIC, STORAGE_KEY_META]
-        .reduce((sum, k) => sum + (localStorage.getItem(k)?.length ?? 0), 0);
-      const kb = (bytes / 1024).toFixed(1);
-      const usedKB = bytes / 1024;
-      const quotaNote = ` / ~5 MB (${(usedKB / STORAGE_QUOTA_KB * 100).toFixed(1)}%)`;
-      const evictNote = storageState.note ? ` (${storageState.note})` : '';
-      document.getElementById('storage-usage').textContent = `${kb} KB${quotaNote}${evictNote}`;
-    } catch (_) {}
   }, 1000);
 }

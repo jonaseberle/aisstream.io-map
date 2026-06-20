@@ -2,6 +2,7 @@ import './legend.js'; // instantiates the legend/filter control as a side effect
 import { loadVesselData, saveVesselData } from './storage.js';
 import { startStatsLoop } from './stats.js';
 import { initWebSocket } from './websocket.js';
+import { flushMessageQueue } from './messages.js';
 import { initSmoothMotionControls, startSmoothMotionLoop, setVisibilityRefresher } from './smoothMotion.js';
 import { loadSettings, resetSettings, saveSettings } from './settings.js';
 import { filterState, applyVisibility } from './visibility.js';
@@ -10,6 +11,13 @@ import { ships } from './state.js';
 loadVesselData();
 setInterval(saveVesselData, 30_000);
 setInterval(saveSettings, 5_000);
+// Incoming AIS messages are queued (websocket.js) rather than applied the
+// instant each one arrives — drained in one coalesced batch every 200ms,
+// so a burst of reports for the same ship costs one icon/trail redraw
+// instead of one per message. saveVesselData() also flushes the queue
+// itself (see storage.js) before reading ship state, so a save can't catch
+// stale, not-yet-applied data sitting in the queue.
+setInterval(flushMessageQueue, 200);
 startStatsLoop();
 initWebSocket();
 // Lets smoothMotion.js refresh every ship's visibility when smooth motion is

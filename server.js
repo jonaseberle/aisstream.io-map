@@ -82,16 +82,44 @@ function subscribe(bounds) {
   }));
 }
 
+// A TCP/WebSocket connection can die silently (NAT timeout, wifi blip,
+// upstream-side hiccup) without ever firing 'close' or 'error' — the socket
+// just sits there reporting OPEN while no more data arrives, so the usual
+// close/error-triggered reconnect never kicks in. Detected here the
+// standard way (ws README's "detecting broken connections"): ping on an
+// interval and require a pong (or any real message — that's just as good
+// proof of life) within a generous timeout, or treat the connection as dead
+// and force-reconnect.
+const PING_INTERVAL_MS = 20_000;
+const STALE_TIMEOUT_MS = 45_000; // > 2x ping interval, so one missed pong doesn't trip it
+let pingTimer = null;
+let lastAliveAt = Date.now();
+
 function connectToAIS() {
   log('Connecting to aisstream.io...');
   aisSocket = new WebSocket('wss://stream.aisstream.io/v0/stream');
+  lastAliveAt = Date.now();
 
   aisSocket.on('open', () => {
     log('Connected to aisstream.io');
     subscribe(currentBounds);
+    lastAliveAt = Date.now();
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => {
+      if (aisSocket?.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastAliveAt > STALE_TIMEOUT_MS) {
+        log(`AIS stream stalled (no data/pong for ${Math.round((Date.now() - lastAliveAt) / 1000)}s) — forcing reconnect`);
+        aisSocket.terminate(); // skips the close handshake (which a dead socket won't complete anyway); triggers 'close' below
+        return;
+      }
+      aisSocket.ping();
+    }, PING_INTERVAL_MS);
   });
 
+  aisSocket.on('pong', () => { lastAliveAt = Date.now(); });
+
   aisSocket.on('message', (data) => {
+    lastAliveAt = Date.now(); // real traffic is at least as good proof of life as a pong
     const str = data.toString();
     try {
       const msg = JSON.parse(str);
@@ -118,12 +146,13 @@ function connectToAIS() {
         const lon  = payload?.Longitude;
         const sog  = payload?.Sog;
         const cog  = payload?.Cog;
+        const hdg  = payload?.TrueHeading;
         const meta = shipMeta.get(mmsi);
         const typeStr = meta ? ` type=${meta.typeCode} (${meta.label})` : '';
         const boundsStr = (lat != null && lon != null)
           ? (inBounds(lat, lon) ? ' [IN]' : ` [OUT bounds=${JSON.stringify(currentBounds)}]`)
           : ' [no coords]';
-        log(`[${msg.MessageType}] ${name} (${mmsi}) lat=${lat?.toFixed(4)} lon=${lon?.toFixed(4)} sog=${sog} cog=${cog}${typeStr}${boundsStr}`);
+        log(`[${msg.MessageType}] ${name} (${mmsi}) lat=${lat?.toFixed(4)} lon=${lon?.toFixed(4)} sog=${sog} cog=${cog} hdg=${hdg}${typeStr}${boundsStr}`);
       }
     } catch (_) {}
 
@@ -153,6 +182,7 @@ function connectToAIS() {
   });
 
   aisSocket.on('close', () => {
+    clearInterval(pingTimer);
     log('AIS stream closed, reconnecting in 5s...');
     setTimeout(connectToAIS, 5000);
   });

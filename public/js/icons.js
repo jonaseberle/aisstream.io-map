@@ -1,5 +1,6 @@
 import { map } from './map.js';
 import { CATEGORIES, shipCategory } from './categories.js';
+import { filterState } from './visibility.js';
 
 export function pixelsPerMeter(lat, zoom) {
   return (256 * Math.pow(2, zoom)) / (40075016.686 * Math.cos(lat * Math.PI / 180));
@@ -61,7 +62,7 @@ const CATEGORY_POLY_POINTS = {
   hsc:       [[8, 1], [11, 19], [8, 15], [5, 19]],
   military:  [[3, 3], [13, 3], [13, 17], [3, 17]],
 };
-const SPEED_DOT_SPACING = 3; // px between speed dots, 1 dot per knot at zoom >= 11
+export const SPEED_DOT_SPACING = 3; // px between speed dots, 1 dot per knot at zoom >= 11
 
 function pointsBounds(points, margin = 0) {
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -159,40 +160,51 @@ export function shipIcon(headingAngle, dotAngle, sog, typeCode, dim, isFloating)
       // Draw the hull symmetric left/right (half the reported beam on each
       // side), rather than skewed by the GPS antenna's actual port/starboard offset.
       const halfBeam = beamPx / 2;
-      const bowLen = Math.min(beamPx * 0.7, A); // triangular bow section height
+      const half = lengthPx / 2; // hull half-length from the middle — the pivot/anchor below, not the antenna
+      const bowLen = Math.min(beamPx * 0.7, half); // triangular bow section height
+
+      // The GPS antenna sits wherever the AIS dimension report says, offset
+      // from the hull's middle (the rotation pivot — see shipMiddlePosition
+      // in geo.js, which the marker itself is now positioned at).
+      const antennaX = (C - D) / 2; // +starboard
+      const antennaY = (A - B) / 2; // +stern
 
       // Tight bounding box of the hull alone, in its unrotated "pointing up"
       // orientation — safe for any headingAngle since the body's whole <svg>
       // layer is what gets CSS-rotated. The speed dots are placed via
       // explicit trig (see below) and are NOT angle-independent, so their
       // actual extent is unioned in afterwards.
-      const localHullPts = [[0, -A], [halfBeam, -A + bowLen], [halfBeam, B], [-halfBeam, B], [-halfBeam, -A + bowLen]];
+      const localHullPts = [[0, -half], [halfBeam, -half + bowLen], [halfBeam, half], [-halfBeam, half], [-halfBeam, -half + bowLen]];
       const crossR = 3;
       let bounds = pointsBounds(localHullPts, 2); // margin for stroke width + bow-circle radius
-      bounds = unionBounds(bounds, { minX: -crossR, maxX: crossR, minY: -crossR, maxY: crossR });
+      if (filterState.showAntenna) bounds = unionBounds(bounds, pointsBounds([[antennaX, antennaY]], crossR));
       if (isFloating) bounds = unionBounds(bounds, { minX: -4.5, maxX: 4.5, minY: -4.5, maxY: 4.5 });
 
       // Speed dots, anchored at the bow tip's rotated position, extending
-      // towards dotsAngle — computed relative to the antenna (0,0) for now;
-      // shifted into the final canvas once its size is known below.
-      const dotPtsLocal = speedDotPoints([0, 0], -A, angle, dotsAngle, dotCount);
+      // towards dotsAngle — computed relative to the middle pivot (0,0) for
+      // now; shifted into the final canvas once its size is known below.
+      const dotPtsLocal = speedDotPoints([0, 0], -half, angle, dotsAngle, dotCount);
       if (dotPtsLocal.length) bounds = unionBounds(bounds, pointsBounds(dotPtsLocal, 1.5));
 
       const width = bounds.maxX - bounds.minX, height = bounds.maxY - bounds.minY;
-      const ox = -bounds.minX, oy = -bounds.minY; // antenna position within the tight canvas
+      const ox = -bounds.minX, oy = -bounds.minY; // the hull's middle (== marker's latlng) within the tight canvas
 
       const pts = [
-        `${ox.toFixed(1)},${(oy - A).toFixed(1)}`,           // bow tip
-        `${(ox + halfBeam).toFixed(1)},${(oy - A + bowLen).toFixed(1)}`, // starboard shoulder
-        `${(ox + halfBeam).toFixed(1)},${(oy + B).toFixed(1)}`,     // starboard stern
-        `${(ox - halfBeam).toFixed(1)},${(oy + B).toFixed(1)}`,     // port stern
-        `${(ox - halfBeam).toFixed(1)},${(oy - A + bowLen).toFixed(1)}`, // port shoulder
+        `${ox.toFixed(1)},${(oy - half).toFixed(1)}`,           // bow tip
+        `${(ox + halfBeam).toFixed(1)},${(oy - half + bowLen).toFixed(1)}`, // starboard shoulder
+        `${(ox + halfBeam).toFixed(1)},${(oy + half).toFixed(1)}`,     // starboard stern
+        `${(ox - halfBeam).toFixed(1)},${(oy + half).toFixed(1)}`,     // port stern
+        `${(ox - halfBeam).toFixed(1)},${(oy - half + bowLen).toFixed(1)}`, // port shoulder
       ].join(' ');
-      const bodyContent = `<polygon points="${pts}" fill="${color}" fill-opacity="0.85" stroke="rgba(255,255,255,0.4)" stroke-width="0.8"/><circle cx="${ox.toFixed(1)}" cy="${(oy - A).toFixed(1)}" r="1.5" fill="white" opacity="0.9"/>`;
-      const speedDots = speedDotsSvg(speedDotPoints([ox, oy], -A, angle, dotsAngle, dotCount));
-      // GPS antenna crosshair stays upright — drawn in the static layer.
-      const crossLines = `<line x1="${(ox - crossR).toFixed(1)}" y1="${oy.toFixed(1)}" x2="${(ox + crossR).toFixed(1)}" y2="${oy.toFixed(1)}" stroke="magenta" stroke-width="1"/><line x1="${ox.toFixed(1)}" y1="${(oy - crossR).toFixed(1)}" x2="${ox.toFixed(1)}" y2="${(oy + crossR).toFixed(1)}" stroke="magenta" stroke-width="1"/>`;
-      const staticContent = crossLines + speedDots + (isFloating ? floatingMarkSvg(ox, oy) : '');
+      // GPS antenna crosshair — a fixed point on the hull, so (unlike before,
+      // when it sat right at the non-rotating anchor) it now lives in the
+      // rotating body layer and swings around the middle with the hull.
+      const antennaMark = filterState.showAntenna
+        ? `<line x1="${(ox + antennaX - crossR).toFixed(1)}" y1="${(oy + antennaY).toFixed(1)}" x2="${(ox + antennaX + crossR).toFixed(1)}" y2="${(oy + antennaY).toFixed(1)}" stroke="magenta" stroke-width="1"/><line x1="${(ox + antennaX).toFixed(1)}" y1="${(oy + antennaY - crossR).toFixed(1)}" x2="${(ox + antennaX).toFixed(1)}" y2="${(oy + antennaY + crossR).toFixed(1)}" stroke="magenta" stroke-width="1"/>`
+        : '';
+      const bodyContent = `<polygon points="${pts}" fill="${color}" fill-opacity="0.85" stroke="rgba(255,255,255,0.4)" stroke-width="0.8"/><circle cx="${ox.toFixed(1)}" cy="${(oy - half).toFixed(1)}" r="1.5" fill="white" opacity="0.9"/>${antennaMark}`;
+      const speedDots = speedDotsSvg(speedDotPoints([ox, oy], -half, angle, dotsAngle, dotCount));
+      const staticContent = speedDots + (isFloating ? floatingMarkSvg(ox, oy) : '');
       return layeredIcon({ width, height, anchorX: ox, anchorY: oy, angle, bodyOpacity, bodyContent, staticContent });
     }
   }

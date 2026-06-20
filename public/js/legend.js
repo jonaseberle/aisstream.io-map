@@ -1,10 +1,12 @@
 import './settings.js'; // load saved UI settings before building controls below
-import { map } from './map.js';
+import { map, MAP_SOURCES, setMapSource } from './map.js';
 import { ships } from './state.js';
 import { CATEGORIES, CATEGORY_TYPES, SHIP_TYPES } from './categories.js';
 import { shapeSvgInner } from './icons.js';
 import { filterState, hiddenCategories, hiddenTypes, applyVisibility, refreshTrail, MAX_AGE_SLIDER_MAX, MAX_LENGTH_SLIDER_MAX, MAX_INTERVAL_SLIDER_MAX, FLOATING_DISPLAY_SLIDER_MAX } from './visibility.js';
 import { saveVesselData } from './storage.js';
+import { updateLabel, refreshIcon } from './messages.js';
+import { saveSettings } from './settings.js';
 
 // ── Legend ───────────────────────────────────────────────────────────────
 const AisLegend = L.Control.extend({
@@ -13,10 +15,18 @@ const AisLegend = L.Control.extend({
     L.DomEvent.disableClickPropagation(div);
     L.DomEvent.disableScrollPropagation(div);
 
-    // ── Collapse header ──
+    // ── Collapse header ── (also hosts the connection status, relocated
+    // from the old page header — same ids, so websocket.js's
+    // getElementById('status-dot'/'status-text') and stats.js's msg-rate
+    // keep working unchanged.)
     const hdr = document.createElement('div');
     hdr.className = 'legend-header';
-    hdr.innerHTML = '<span>Filters</span><span class="legend-toggle">▲</span>';
+    hdr.innerHTML = `<span class="legend-header-left">
+        <span id="status-dot" style="display: inline-block"></span>
+        <span id="status-text">Connecting…</span>
+        <span id="msg-rate-wrap">(<strong id="msg-rate">0</strong> msg/s)</span>
+        <span></span>
+      </span><span class="legend-toggle">▲</span>`;
     div.appendChild(hdr);
 
     const content = document.createElement('div');
@@ -38,34 +48,172 @@ const AisLegend = L.Control.extend({
       row.querySelector('input').addEventListener('change', onChange);
       return row;
     }
+    function mkRadioRow(name, id, label, checked, onChange) {
+      const row = document.createElement('div');
+      row.className = 'legend-row';
+      row.innerHTML = `<input type="radio" name="${name}" id="${id}"${checked ? ' checked' : ''}>
+        <label for="${id}">${label}</label>`;
+      row.querySelector('input').addEventListener('change', onChange);
+      return row;
+    }
+    // Wraps a <input type=range> with "‹"/"›" buttons that nudge it by one
+    // step — applied to every slider in the panel in one pass, at the end
+    // (see the loop near `return div`), rather than per-slider, so it
+    // automatically covers any slider added above without extra boilerplate.
+    function addSteppers(slider) {
+      const step = parseFloat(slider.step) || 1;
+      const decimals = (String(step).split('.')[1] || '').length;
+      const bump = (delta) => {
+        const min = parseFloat(slider.min), max = parseFloat(slider.max);
+        const v = Math.min(max, Math.max(min, parseFloat(slider.value) + delta));
+        slider.value = decimals ? v.toFixed(decimals) : v;
+        slider.dispatchEvent(new Event('input', { bubbles: true }));
+      };
+      const mkBtn = (symbol, delta) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'legend-step-btn';
+        btn.textContent = symbol;
+        btn.addEventListener('click', () => bump(delta));
+        return btn;
+      };
+      slider.insertAdjacentElement('beforebegin', mkBtn('‹', -step));
+      slider.insertAdjacentElement('afterend', mkBtn('›', step));
+    }
 
-    content.appendChild(mkCheckRow('filter-show-moving', 'Show moving (&gt;0.5 kts)', filterState.showMoving, (e) => {
-      filterState.showMoving = e.target.checked;
+    // A titled, independently foldable group — fold state persists in
+    // filterState[key] (saved like any other filter, via the cookie).
+    // Appends both the title and its body to `content` and returns the
+    // body so callers can append their rows/sliders into it.
+    function mkGroup(label, key) {
+      const titleRow = document.createElement('div');
+      titleRow.className = 'legend-title legend-group-title';
+      titleRow.innerHTML = `<span>${label}</span><span class="legend-toggle">${filterState[key] ? '▶' : '▼'}</span>`;
+      const body = document.createElement('div');
+      body.className = 'legend-group-body';
+      if (filterState[key]) body.classList.add('collapsed');
+      titleRow.addEventListener('click', () => {
+        filterState[key] = !filterState[key];
+        body.classList.toggle('collapsed', filterState[key]);
+        titleRow.querySelector('.legend-toggle').textContent = filterState[key] ? '▶' : '▼';
+        saveSettings();
+      });
+      content.appendChild(titleRow);
+      content.appendChild(body);
+      return body;
+    }
+
+    const smoothMotionBody = mkGroup('Smooth Motion', 'smoothMotionCollapsed');
+
+    const smRow = document.createElement('div');
+    smRow.className = 'legend-row';
+    smRow.innerHTML = `<label id="smooth-motion-label"><input type="checkbox" id="smooth-motion-checkbox"> Smooth motion</label>`;
+    smoothMotionBody.appendChild(smRow);
+
+    const smSliderRow = document.createElement('div');
+    smSliderRow.className = 'legend-slider';
+    smSliderRow.innerHTML = `<label id="smooth-motion-delta-label" title="How far in the past, in seconds, smooth motion displays vessel positions — trades immediacy for a smoother, more accurate interpolation between AIS reports.">Delta(s): 300</label>
+      <input type="range" id="smooth-motion-slider" min="60" max="3000" step="10" value="300">`;
+    smoothMotionBody.appendChild(smSliderRow);
+
+    // initSmoothMotionControls() (called from main.js, after legend.js builds
+    // this panel) attaches the real listeners to the elements above — same
+    // ids as before, just relocated from the header into this group.
+
+    const tensionRow = document.createElement('div');
+    tensionRow.className = 'legend-slider';
+    tensionRow.innerHTML = `<label id="tension-label" title="How much the smooth-motion path bulges toward each fix's reported course vs. hugging the straight line between fixes.">Tension: ${filterState.smoothMotionTension.toFixed(2)}</label>
+      <input type="range" id="tension-slider" min="0" max="1" step="0.05" value="${filterState.smoothMotionTension}">`;
+    tensionRow.querySelector('#tension-slider').addEventListener('input', (e) => {
+      filterState.smoothMotionTension = parseFloat(e.target.value);
+      document.getElementById('tension-label').textContent = `Tension: ${filterState.smoothMotionTension.toFixed(2)}`;
+    });
+    smoothMotionBody.appendChild(tensionRow);
+
+    const minIntervalRow = document.createElement('div');
+    minIntervalRow.className = 'legend-slider';
+    minIntervalRow.innerHTML = `<label id="min-interval-label">Min. interval (moving vessels): ${filterState.minIntervalSec}s</label>
+      <input type="range" id="min-interval-slider" min="0" max="${MAX_INTERVAL_SLIDER_MAX}" step="5" value="${filterState.minIntervalSec}">`;
+    minIntervalRow.querySelector('#min-interval-slider').addEventListener('input', (e) => {
+      filterState.minIntervalSec = parseInt(e.target.value, 10);
+      document.getElementById('min-interval-label').textContent = `Min. interval (moving vessels): ${filterState.minIntervalSec}s`;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
-    }));
-    content.appendChild(mkCheckRow('filter-show-nonmoving', 'Show non-moving', filterState.showNonMoving, (e) => {
-      filterState.showNonMoving = e.target.checked;
+    });
+    smoothMotionBody.appendChild(minIntervalRow);
+
+    const maxIntervalRow = document.createElement('div');
+    maxIntervalRow.className = 'legend-slider';
+    maxIntervalRow.innerHTML = `<label id="max-interval-label">Max. interval (moving vessels): ${filterState.maxIntervalSec >= MAX_INTERVAL_SLIDER_MAX ? 'off' : filterState.maxIntervalSec + 's'}</label>
+      <input type="range" id="max-interval-slider" min="0" max="${MAX_INTERVAL_SLIDER_MAX}" step="5" value="${filterState.maxIntervalSec}">`;
+    maxIntervalRow.querySelector('#max-interval-slider').addEventListener('input', (e) => {
+      filterState.maxIntervalSec = parseInt(e.target.value, 10);
+      document.getElementById('max-interval-label').textContent = filterState.maxIntervalSec >= MAX_INTERVAL_SLIDER_MAX
+        ? 'Max. interval (moving vessels): off'
+        : `Max. interval (moving vessels): ${filterState.maxIntervalSec}s`;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
-    }));
-    content.appendChild(mkCheckRow('filter-spoofed', 'Hide unreliable/spoofed position', filterState.hideSpoofed, (e) => {
-      filterState.hideSpoofed = e.target.checked;
-      for (const mmsi of ships.keys()) applyVisibility(mmsi);
-    }));
-    content.appendChild(mkCheckRow('filter-hdg000', 'Hide unreliable heading/course', filterState.filterHdg000, (e) => {
-      filterState.filterHdg000 = e.target.checked;
-      for (const mmsi of ships.keys()) applyVisibility(mmsi);
-    }));
-    content.appendChild(mkCheckRow('filter-navstatus', 'Hide unreliable navStatus', filterState.hideUnreliableNavStatus, (e) => {
-      filterState.hideUnreliableNavStatus = e.target.checked;
-      for (const mmsi of ships.keys()) applyVisibility(mmsi);
-    }));
-    content.appendChild(mkCheckRow('filter-show-fixes', 'Show AIS fixes', filterState.showFixes, (e) => {
+    });
+    smoothMotionBody.appendChild(maxIntervalRow);
+
+    const smSep = document.createElement('div');
+    smSep.className = 'legend-sep';
+    content.appendChild(smSep);
+
+    const boundsBody = mkGroup('Bounds', 'boundsCollapsed');
+
+    const fbRow = document.createElement('div');
+    fbRow.className = 'legend-row';
+    fbRow.innerHTML = `<label id="freeze-bounds-label" title="Stop updating the dashed bounding-box outline on the map."><input type="checkbox" id="freeze-bounds-checkbox"> Freeze bounds rect</label>`;
+    boundsBody.appendChild(fbRow);
+    // initBoundsRectControls() (called from main.js via initWebSocket(),
+    // after legend.js builds this panel) attaches the real listener — same
+    // id as before, just relocated from the header into this group.
+
+    const boundsSep = document.createElement('div');
+    boundsSep.className = 'legend-sep';
+    content.appendChild(boundsSep);
+
+    const displayBody = mkGroup('Display', 'displayCollapsed');
+
+    displayBody.appendChild(mkCheckRow('filter-show-fixes', 'Show AIS fixes', filterState.showFixes, (e) => {
       filterState.showFixes = e.target.checked;
       // Live mode adds/removes the fix circles here; smooth motion's loop
       // picks the change up on its next tick.
       for (const ship of ships.values()) refreshTrail(ship);
     }));
+    displayBody.appendChild(mkCheckRow('filter-show-labels', 'Show ship name labels', filterState.showLabels, (e) => {
+      filterState.showLabels = e.target.checked;
+      for (const mmsi of ships.keys()) updateLabel(mmsi);
+    }));
+    displayBody.appendChild(mkCheckRow('filter-show-antenna', 'Show GPS antenna position', filterState.showAntenna, (e) => {
+      filterState.showAntenna = e.target.checked;
+      // Force a redraw even under smooth motion, where the loop only
+      // redraws on a heading change — this toggle doesn't change heading.
+      for (const [mmsi, ship] of ships) { refreshIcon(mmsi); ship.smoothIconHeading = null; }
+    }));
 
+    const speedHint = document.createElement('div');
+    speedHint.id = 'speed-hint';
+    speedHint.className = 'legend-hint';
+    speedHint.textContent = 'Each white dot ahead of the bow = 1 knot of speed';
+    displayBody.appendChild(speedHint);
+
+    const mapSourceTitle = document.createElement('div');
+    mapSourceTitle.className = 'legend-hint';
+    mapSourceTitle.style.marginTop = '8px';
+    mapSourceTitle.textContent = 'Map style:';
+    displayBody.appendChild(mapSourceTitle);
+
+    // Applies the cookie-restored choice right away — map.js itself only
+    // knows the hardcoded 'dark' default, since it stays filterState-free
+    // to avoid a map.js <-> visibility.js import cycle.
+    setMapSource(filterState.mapSource);
+    for (const [key, label] of Object.entries(MAP_SOURCES)) {
+      displayBody.appendChild(mkRadioRow('map-source', `map-source-${key}`, label, filterState.mapSource === key, (e) => {
+        if (!e.target.checked) return;
+        filterState.mapSource = key;
+        setMapSource(key);
+      }));
+    }
 
     const sliderRow = document.createElement('div');
     sliderRow.className = 'legend-slider';
@@ -78,7 +226,7 @@ const AisLegend = L.Control.extend({
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
       for (const ship of ships.values()) refreshTrail(ship);
     });
-    content.appendChild(sliderRow);
+    displayBody.appendChild(sliderRow);
 
     // Lead line: how far AHEAD to project the smooth-motion track. Only has a
     // visible effect while smooth motion is on (the smooth-motion loop reads
@@ -92,7 +240,34 @@ const AisLegend = L.Control.extend({
       document.getElementById('lead-label').textContent =
         filterState.leadSec === 0 ? 'Lead: off' : `Lead: ${filterState.leadSec}s`;
     });
-    content.appendChild(leadRow);
+    displayBody.appendChild(leadRow);
+
+    const displaySep = document.createElement('div');
+    displaySep.className = 'legend-sep';
+    content.appendChild(displaySep);
+
+    const filtersBody = mkGroup('Filters', 'filtersCollapsed');
+
+    filtersBody.appendChild(mkCheckRow('filter-show-moving', 'Show moving (&gt;0.5 kts)', filterState.showMoving, (e) => {
+      filterState.showMoving = e.target.checked;
+      for (const mmsi of ships.keys()) applyVisibility(mmsi);
+    }));
+    filtersBody.appendChild(mkCheckRow('filter-show-nonmoving', 'Show non-moving', filterState.showNonMoving, (e) => {
+      filterState.showNonMoving = e.target.checked;
+      for (const mmsi of ships.keys()) applyVisibility(mmsi);
+    }));
+    filtersBody.appendChild(mkCheckRow('filter-spoofed', 'Hide unreliable/spoofed position', filterState.hideSpoofed, (e) => {
+      filterState.hideSpoofed = e.target.checked;
+      for (const mmsi of ships.keys()) applyVisibility(mmsi);
+    }));
+    filtersBody.appendChild(mkCheckRow('filter-hdg000', 'Hide unreliable heading/course', filterState.filterHdg000, (e) => {
+      filterState.filterHdg000 = e.target.checked;
+      for (const mmsi of ships.keys()) applyVisibility(mmsi);
+    }));
+    filtersBody.appendChild(mkCheckRow('filter-navstatus', 'Hide unreliable navStatus', filterState.hideUnreliableNavStatus, (e) => {
+      filterState.hideUnreliableNavStatus = e.target.checked;
+      for (const mmsi of ships.keys()) applyVisibility(mmsi);
+    }));
 
     const ageRow = document.createElement('div');
     ageRow.className = 'legend-slider';
@@ -105,7 +280,7 @@ const AisLegend = L.Control.extend({
       document.getElementById('min-age-label').textContent = `Min. age: ${filterState.minAgeSec}s`;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
     });
-    content.appendChild(minAgeRow);
+    filtersBody.appendChild(minAgeRow);
 
     ageRow.innerHTML = `<label id="age-label">Max. age: ${filterState.maxAgeSec}s</label>
       <input type="range" id="age-slider" min="0" max="${MAX_AGE_SLIDER_MAX}" value="${filterState.maxAgeSec}">`;
@@ -115,7 +290,7 @@ const AisLegend = L.Control.extend({
         filterState.maxAgeSec >= MAX_AGE_SLIDER_MAX ? 'Max. age: off' : `Max. age: ${filterState.maxAgeSec}s`;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
     });
-    content.appendChild(ageRow);
+    filtersBody.appendChild(ageRow);
 
     const floatingRow = document.createElement('div');
     floatingRow.className = 'legend-slider';
@@ -128,31 +303,7 @@ const AisLegend = L.Control.extend({
         : `Show floating targets for: ${filterState.floatingDisplaySec}s`;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
     });
-    content.appendChild(floatingRow);
-
-    const minIntervalRow = document.createElement('div');
-    minIntervalRow.className = 'legend-slider';
-    minIntervalRow.innerHTML = `<label id="min-interval-label">Min. interval (moving vessels): ${filterState.minIntervalSec}s</label>
-      <input type="range" id="min-interval-slider" min="0" max="${MAX_INTERVAL_SLIDER_MAX}" step="5" value="${filterState.minIntervalSec}">`;
-    minIntervalRow.querySelector('#min-interval-slider').addEventListener('input', (e) => {
-      filterState.minIntervalSec = parseInt(e.target.value, 10);
-      document.getElementById('min-interval-label').textContent = `Min. interval (moving vessels): ${filterState.minIntervalSec}s`;
-      for (const mmsi of ships.keys()) applyVisibility(mmsi);
-    });
-    content.appendChild(minIntervalRow);
-
-    const maxIntervalRow = document.createElement('div');
-    maxIntervalRow.className = 'legend-slider';
-    maxIntervalRow.innerHTML = `<label id="max-interval-label">Max. interval (moving vessels): ${filterState.maxIntervalSec >= MAX_INTERVAL_SLIDER_MAX ? 'off' : filterState.maxIntervalSec + 's'}</label>
-      <input type="range" id="max-interval-slider" min="0" max="${MAX_INTERVAL_SLIDER_MAX}" step="5" value="${filterState.maxIntervalSec}">`;
-    maxIntervalRow.querySelector('#max-interval-slider').addEventListener('input', (e) => {
-      filterState.maxIntervalSec = parseInt(e.target.value, 10);
-      document.getElementById('max-interval-label').textContent = filterState.maxIntervalSec >= MAX_INTERVAL_SLIDER_MAX
-        ? 'Max. interval (moving vessels): off'
-        : `Max. interval (moving vessels): ${filterState.maxIntervalSec}s`;
-      for (const mmsi of ships.keys()) applyVisibility(mmsi);
-    });
-    content.appendChild(maxIntervalRow);
+    filtersBody.appendChild(floatingRow);
 
     const minLengthRow = document.createElement('div');
     minLengthRow.className = 'legend-slider';
@@ -163,7 +314,7 @@ const AisLegend = L.Control.extend({
       document.getElementById('min-length-label').textContent = `Min. length: ${filterState.minLengthM}m`;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
     });
-    content.appendChild(minLengthRow);
+    filtersBody.appendChild(minLengthRow);
 
     const maxLengthRow = document.createElement('div');
     maxLengthRow.className = 'legend-slider';
@@ -175,16 +326,13 @@ const AisLegend = L.Control.extend({
         filterState.maxLengthM >= MAX_LENGTH_SLIDER_MAX ? 'Max. length: off' : `Max. length: ${filterState.maxLengthM}m`;
       for (const mmsi of ships.keys()) applyVisibility(mmsi);
     });
-    content.appendChild(maxLengthRow);
+    filtersBody.appendChild(maxLengthRow);
 
     const sep = document.createElement('div');
     sep.className = 'legend-sep';
     content.appendChild(sep);
 
-    const title = document.createElement('div');
-    title.className = 'legend-title';
-    title.textContent = 'Ship types';
-    content.appendChild(title);
+    const shipTypesBody = mkGroup('Ship types', 'shipTypesCollapsed');
 
     // ── Per-category with collapsible sub-types ──
     for (const [cat, { color, label }] of Object.entries(CATEGORIES)) {
@@ -285,21 +433,56 @@ const AisLegend = L.Control.extend({
         for (const mmsi of ships.keys()) applyVisibility(mmsi);
       });
 
-      content.appendChild(catRow);
-      if (types.length > 0) content.appendChild(subContainer);
+      shipTypesBody.appendChild(catRow);
+      if (types.length > 0) shipTypesBody.appendChild(subContainer);
     }
 
-    const hint = document.createElement('div');
-    hint.id = 'dim-hint';
-    hint.className = 'legend-hint legend-hint--dim';
-    hint.textContent = 'Zoom in to show vessel dimensions';
-    content.appendChild(hint);
+    const shipTypesSep = document.createElement('div');
+    shipTypesSep.className = 'legend-sep';
+    content.appendChild(shipTypesSep);
 
-    const speedHint = document.createElement('div');
-    speedHint.id = 'speed-hint';
-    speedHint.className = 'legend-hint';
-    speedHint.textContent = 'Each white dot ahead of the bow = 1 knot of speed';
-    content.appendChild(speedHint);
+    const debugBody = mkGroup('Debug', 'debugCollapsed');
+
+    const statsRow = document.createElement('div');
+    statsRow.className = 'legend-row';
+    statsRow.innerHTML = `<span>Ships: <strong id="ship-count">0</strong></span>`;
+    debugBody.appendChild(statsRow);
+
+    const movingRow = document.createElement('div');
+    movingRow.className = 'legend-row';
+    movingRow.innerHTML = `<span>Moving: <strong id="moving-count">0</strong></span>`;
+    debugBody.appendChild(movingRow);
+
+    const singleObsRow = document.createElement('div');
+    singleObsRow.className = 'legend-row';
+    singleObsRow.innerHTML = `<span>Single obs.: <strong id="single-obs-count">0</strong></span>`;
+    debugBody.appendChild(singleObsRow);
+
+    const intervalRow = document.createElement('div');
+    intervalRow.className = 'legend-row';
+    intervalRow.innerHTML = `<span>Last update interval (moving vessels): <br><strong id="avg-interval" title="p50 and p80 are percentiles: 50% (resp. 80%) of samples are at or below this value.">—</strong></span>`;
+    debugBody.appendChild(intervalRow);
+
+    const resetSep = document.createElement('div');
+    resetSep.className = 'legend-sep';
+    content.appendChild(resetSep);
+
+    const resetButton = document.createElement('button');
+    resetButton.id = 'reset-settings-button';
+    resetButton.className = 'legend-button';
+    resetButton.title = 'Reset settings';
+    resetButton.textContent = 'Reset settings';
+    content.appendChild(resetButton);
+    // main.js attaches the real click handler — same id as before, just
+    // relocated from the header into the settings panel itself.
+
+    // Persist every filter/category/type change immediately, rather than
+    // waiting for main.js's periodic save — catches changes made right
+    // before a reload/close.
+    content.addEventListener('change', () => saveSettings());
+    content.addEventListener('input', () => saveSettings());
+
+    for (const slider of content.querySelectorAll('input[type=range]')) addSteppers(slider);
 
     return div;
   },

@@ -1,11 +1,20 @@
 import { map, updateHash } from './map.js';
 import { ships } from './state.js';
 import { applyVisibility } from './visibility.js';
-import { refreshIcon, updateShip } from './messages.js';
+import { refreshIcon, queueMessage } from './messages.js';
 import { incrementMsgCount } from './stats.js';
+import { saveSettings } from './settings.js';
 
-const statusDot = document.getElementById('status-dot');
-const statusText = document.getElementById('status-text');
+// Looked up lazily (not cached at module load) — #status-dot/#status-text
+// are built by legend.js, and a pre-existing circular import (settings.js
+// <-> websocket.js) means this module's top-level code can run before that
+// DOM exists; caching `null` here would silently break the indicator forever.
+function setStatus(className, text) {
+  const dot = document.getElementById('status-dot');
+  const textEl = document.getElementById('status-text');
+  if (dot) dot.className = className;
+  if (textEl) textEl.textContent = text;
+}
 let activeWs = null;
 
 // Outline of the bounding box currently subscribed to on aisstream.io —
@@ -57,7 +66,7 @@ function initBoundsRectControls() {
     // Reflect the (possibly cookie-restored) saved state onto the checkbox,
     // rather than reading the checkbox's static HTML default into state.
     checkbox.checked = boundsRectState.frozen;
-    checkbox.addEventListener('change', (e) => { boundsRectState.frozen = e.target.checked; });
+    checkbox.addEventListener('change', (e) => { boundsRectState.frozen = e.target.checked; saveSettings(); });
   }
   // Show whatever bounding box was last known (e.g. restored from the
   // settings cookie) right away — don't wait for the websocket to connect
@@ -65,16 +74,12 @@ function initBoundsRectControls() {
   if (boundsRectState.bounds) drawBoundsRect(boundsRectState.bounds);
 }
 
-let lastZoom = map.getZoom();
 function updateBoundsVisibility() {
   const b = map.getBounds();
-  const zoomChanged = map.getZoom() !== lastZoom;
-  lastZoom = map.getZoom();
   for (const mmsi of ships.keys()) {
     const ship = ships.get(mmsi);
     ship.inBounds = b.contains([ship.data.lat, ship.data.lon]);
-    if (zoomChanged) refreshIcon(mmsi); // refreshIcon calls applyVisibility
-    else applyVisibility(mmsi);
+    applyVisibility(mmsi);
   }
 }
 
@@ -82,25 +87,45 @@ let boundsTimer = null;
 function onMapMove() {
   updateHash();
   clearTimeout(boundsTimer);
-  boundsTimer = setTimeout(() => { updateBoundsVisibility(); sendBounds(activeWs); }, 500);
+  boundsTimer = setTimeout(() => {
+    updateBoundsVisibility(); // live on-screen filtering — independent of the frozen subscription
+    // While frozen, the subscription is deliberately pinned — panning/
+    // zooming around to inspect it shouldn't re-send (or re-affirm) a
+    // bounds update at all.
+    if (!boundsRectState.frozen) sendBounds(activeWs);
+  }, 500);
+}
+
+// Icon dimensions/speed-dot count/cog-line length are all zoom-dependent
+// (pixelsPerMeter, speedDotZoomFactor) — redraw every icon the instant zoom
+// actually settles, rather than waiting on the 500ms pan/zoom-settle debounce
+// above (which exists to avoid spamming the server with bounds updates, not
+// to delay the icons). Without this, the "each dot = N knots" legend hint
+// (which recomputes every second, unconditionally) could say one scale while
+// the icons still visibly showed the previous zoom's.
+function onZoomEnd() {
+  for (const mmsi of ships.keys()) refreshIcon(mmsi);
 }
 
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
   activeWs = ws;
-  ws.onopen = () => { statusDot.className = 'connected'; statusText.textContent = 'Connected'; sendBounds(ws); };
+  ws.onopen = () => { setStatus('connected', 'Connected'); sendBounds(ws); };
   ws.onmessage = (e) => {
     incrementMsgCount();
-    try { updateShip(JSON.parse(e.data)); }
-    catch (err) { console.error('Parse error:', err, e.data?.slice(0, 200)); }
+    // Parsing/applying is deferred to a periodic batch flush (see
+    // messages.js's queueMessage/flushMessageQueue) — keeps this handler
+    // itself cheap even during a burst of many messages back to back.
+    queueMessage(e.data);
   };
-  ws.onclose = () => { statusDot.className = 'error'; statusText.textContent = 'Reconnecting…'; setTimeout(connect, 3000); };
-  ws.onerror = () => { statusDot.className = 'error'; statusText.textContent = 'Error'; };
+  ws.onclose = () => { setStatus('error', 'Reconnecting…'); setTimeout(connect, 3000); };
+  ws.onerror = () => { setStatus('error', 'Error'); };
 }
 
 export function initWebSocket() {
   initBoundsRectControls();
   map.on('moveend', onMapMove);
   map.on('zoomend', onMapMove);
+  map.on('zoomend', onZoomEnd);
   connect();
 }

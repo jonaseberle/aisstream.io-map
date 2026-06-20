@@ -2,10 +2,11 @@ import { map } from './map.js';
 import { ships, staticData, MAX_TRAIL_POINTS } from './state.js';
 import { CATEGORIES, shipCategory } from './categories.js';
 import { shipIcon } from './icons.js';
-import { resolveHeading, cogBad, bestHeading } from './heading.js';
-import { SPOOF_SPEED_KNOTS, haversineKnots } from './spoof.js';
+import { resolveHeading, cogBad } from './heading.js';
+import { SPOOF_SPEED_KNOTS } from './spoof.js';
 import { applyVisibility, refreshTrail, isShipMoving, isShipFloating } from './visibility.js';
 import { buildPopup } from './popup.js';
+import { flushMessageQueue } from './messages.js';
 
 // ── localStorage persistence ──────────────────────────────────────────────
 export const STORAGE_KEY_SHIPS  = 'ais_ships';
@@ -16,16 +17,47 @@ const STORAGE_TTL_MS = 2 * 60 * 60 * 1000; // prune data older than 2 h on load
 export const STORAGE_QUOTA_KB = 5 * 1024; // localStorage is typically limited to 5 MB
 export const storageState = { note: null }; // null = clean save; string = what was dropped/trimmed
 
-// Initial bearing from (lat1,lon1) to (lat2,lon2), in degrees clockwise from north.
-function bearingDeg(lat1, lon1, lat2, lon2) {
-  const φ1 = lat1 * Math.PI / 180, φ2 = lat2 * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
-  const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
-  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+// Shows a note next to the connection status dot, so localStorage activity
+// (otherwise silent) is visible — a distinct color while a save/load is
+// actually in progress (`busy`), vs. the brief result flash afterwards
+// (default = success, `error` = failed). Reverts to an idle "fix count"
+// readout once the flash times out, rather than disappearing.
+let flashTimer = null;
+function setStorageIndicator(text, variant) {
+  const el = document.getElementById('storage-indicator');
+  if (!el) return;
+  el.textContent = `Storage: ${text}`;
+  el.classList.remove('busy', 'error');
+  if (variant) el.classList.add(variant);
+  el.classList.add('visible');
+}
+function flashStorageIndicator(text, variant) {
+  setStorageIndicator(text, variant);
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(showIdleStorageIndicator, 10000);
+}
+// Total AIS fixes currently held in memory (sum of each ship's trail) — what
+// the next save would persist — plus the actual on-disk size of the last
+// save, shown while nothing's actively loading/saving.
+function showIdleStorageIndicator() {
+  let count = 0;
+  for (const ship of ships.values()) count += ship.history.length;
+  let sizeNote = '';
+  try {
+    const bytes = [STORAGE_KEY_SHIPS, STORAGE_KEY_STATIC, STORAGE_KEY_META]
+      .reduce((sum, k) => sum + (localStorage.getItem(k)?.length ?? 0), 0);
+    const usedKB = bytes / 1024;
+    sizeNote = ` · ${usedKB.toFixed(1)} KB / ~5 MB (${(usedKB / STORAGE_QUOTA_KB * 100).toFixed(1)}%)`;
+  } catch (_) {}
+  setStorageIndicator(`🕐 ${count.toLocaleString()} fixes${sizeNote}`);
 }
 
 export function saveVesselData() {
+  // Apply any messages still sitting in the batch queue first — otherwise a
+  // save could persist stale ship state that's about to change the instant
+  // the next periodic flush runs.
+  flushMessageQueue();
+  setStorageIndicator('💾 Saving…', 'busy');
   const shipIsMoving = (d) => isShipMoving(d.sog);
   let shipsToSave = ships;          // Map or filtered array of [mmsi, ship]
   let saveStatic  = true;
@@ -39,8 +71,14 @@ export function saveVesselData() {
         const d = ship.data;
         shipsObj[mmsi] = {
           data: { ...d, lat: +d.lat.toFixed(4), lon: +d.lon.toFixed(4) },
-          positions:  ship.positions.slice(-maxPoints).map(([la, lo]) => [+la.toFixed(4), +lo.toFixed(4)]),
-          timestamps: ship.timestamps.slice(-maxPoints),
+          // The real per-point cog/sog/hdg/navStatus/declination — saved
+          // verbatim so a reload doesn't need to fabricate them (see
+          // loadVesselData). lat/lon here are already the hull's middle.
+          history: ship.history.slice(-maxPoints).map((h) => ({
+            lat: +h.lat.toFixed(4), lon: +h.lon.toFixed(4),
+            sog: h.sog, cog: h.cog, hdg: h.hdg, navStatus: h.navStatus, declination: h.declination,
+            ts: h.ts, headingReliable: h.headingReliable,
+          })),
           spoofSuspected: ship.spoofSuspected || false,
           maxImpliedKnots: ship.maxImpliedKnots || 0,
         };
@@ -55,11 +93,13 @@ export function saveVesselData() {
       if (step >= 3) parts.push('static data');
       if (maxPoints < MAX_TRAIL_POINTS) parts.push(`trimmed to ${maxPoints} pts/ship`);
       storageState.note = parts.length ? parts.join(', ') : null;
+      flashStorageIndicator(storageState.note ? `✅ Saved (${storageState.note})` : '✅ Saved');
       return;
     } catch (e) {
       if (e.name !== 'QuotaExceededError' && e.code !== 22) {
         console.warn('localStorage save failed:', e.message);
         storageState.note = 'save failed';
+        flashStorageIndicator('⚠️ Save failed', 'error');
         return;
       }
       step++;
@@ -74,6 +114,7 @@ export function saveVesselData() {
       } else {
         console.warn('localStorage: cannot fit data even after full eviction');
         storageState.note = 'save failed';
+        flashStorageIndicator('⚠️ Save failed', 'error');
         return;
       }
     }
@@ -83,7 +124,8 @@ export function saveVesselData() {
 export function loadVesselData() {
   try {
     const savedAt = parseInt(localStorage.getItem(STORAGE_KEY_META) ?? '0', 10);
-    if (!savedAt || Date.now() - savedAt > STORAGE_TTL_MS) return;
+    if (!savedAt || Date.now() - savedAt > STORAGE_TTL_MS) { showIdleStorageIndicator(); return; }
+    setStorageIndicator('📂 Loading…', 'busy');
     const cutoff  = Date.now() - STORAGE_TTL_MS;
 
     const lzParse = (raw) => {
@@ -98,15 +140,17 @@ export function loadVesselData() {
     }
 
     const shipsRaw = localStorage.getItem(STORAGE_KEY_SHIPS);
-    if (!shipsRaw) return;
+    if (!shipsRaw) { flashStorageIndicator('🕐 Nothing to load'); return; }
     for (const [mmsi, saved] of Object.entries(lzParse(shipsRaw))) {
-      // drop positions older than TTL
-      const positions  = [];
-      const timestamps = [];
-      for (let i = 0; i < saved.timestamps.length; i++) {
-        if (saved.timestamps[i] >= cutoff) { positions.push(saved.positions[i]); timestamps.push(saved.timestamps[i]); }
-      }
-      if (!positions.length) continue;
+      // The real per-point cog/sog/hdg/navStatus/declination are persisted
+      // verbatim (see saveVesselData) — no fabricating them from position
+      // deltas. Older saves (before this) won't have `history` at all;
+      // those vessels just don't restore, rather than restoring with made-up
+      // kinematics.
+      const history = (saved.history ?? []).filter((h) => h.ts >= cutoff);
+      if (!history.length) continue;
+      const positions  = history.map((h) => [h.lat, h.lon]);
+      const timestamps = history.map((h) => h.ts);
 
       const data  = saved.data;
       const sd    = staticData.get(mmsi);
@@ -119,38 +163,17 @@ export function loadVesselData() {
       const { heading, usingLastKnown } = resolveHeading(data.cog, data.hdg, data.declination, null);
       const dotAngle = !cogBad(data.cog) ? data.cog : heading;
       const trail  = L.polyline(positions, { color: trailColor, weight: 1.5, opacity: 0.6 });
-      const marker = L.marker([data.lat, data.lon], { icon: shipIcon(heading, dotAngle, data.sog, sd?.typeCode, sd?.dim, isFloating) });
+      // data.lat/data.lon already IS the hull's middle — it was stored that
+      // way (see updateShip in messages.js) before ever being saved here.
+      const middle = [data.lat, data.lon];
+      const marker = L.marker(middle, { icon: shipIcon(heading, dotAngle, data.sog, sd?.typeCode, sd?.dim, isFloating) });
       marker.bindPopup('', { maxWidth: 300 });
       marker.on('click', (e) => { L.DomEvent.stopPropagation(e); marker.getPopup().setContent(buildPopup(mmsi)); marker.openPopup(); });
-      // We don't persist per-point sog/cog/hdg/navStatus across reloads, only
-      // lat/lon+ts — reuse the restored position trail for history (so smooth
-      // motion still has real points to interpolate/lerp against, e.g. at a
-      // 300s delta even though the ship hasn't sent anything for a while).
-      // Approximate each older point's cog/sog from the bearing/distance to
-      // the NEXT point (real movement, not just a copy of the latest report)
-      // so the kinematic arc has real turns to follow instead of degrading
-      // to a straight glide; the last point gets the real, reported values.
-      // declination/navStatus aren't recoverable per-point, so those (and any
-      // turn shape) are still approximations until live messages refine them.
-      // headingReliable is always false for these synthesized points — a
-      // bearing derived from position deltas is fine for animating motion,
-      // but it isn't a real reported heading, so "Hide unreliable
-      // heading/course" must not treat it as one.
-      const history = positions.map((p, i) => {
-        const isLast = i === positions.length - 1;
-        if (isLast) {
-          return { lat: p[0], lon: p[1], sog: data.sog, cog: data.cog, hdg: data.hdg, navStatus: data.navStatus, declination: data.declination, ts: timestamps[i], headingReliable: bestHeading(data.cog, data.hdg, data.declination) != null };
-        }
-        const next = positions[i + 1];
-        const dtMs = timestamps[i + 1] - timestamps[i];
-        const cog = bearingDeg(p[0], p[1], next[0], next[1]);
-        const sog = dtMs > 0 ? haversineKnots(p[0], p[1], next[0], next[1], dtMs) : data.sog;
-        return { lat: p[0], lon: p[1], sog, cog, hdg: cog, navStatus: data.navStatus, declination: data.declination, ts: timestamps[i], headingReliable: false };
-      });
       const ship = {
         marker, trail, data, positions, timestamps, history, inBounds: map.getBounds().contains([data.lat, data.lon]),
         timedOut: false, spoofSuspected, maxImpliedKnots, isFloating,
         lastGoodHeading: heading, usingLastKnownHeading: usingLastKnown,
+        middle,
         onMap: false, trailOnMap: false,
       };
       ships.set(mmsi, ship);
@@ -158,7 +181,9 @@ export function loadVesselData() {
       applyVisibility(mmsi);
     }
     console.log(`Restored ${ships.size} vessels from localStorage (saved ${Math.round((Date.now()-savedAt)/1000)}s ago)`);
+    flashStorageIndicator(`✅ Loaded ${ships.size} vessel${ships.size === 1 ? '' : 's'}`);
   } catch (e) {
     console.warn('localStorage load failed:', e.message);
+    flashStorageIndicator('⚠️ Load failed', 'error');
   }
 }

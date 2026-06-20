@@ -3,6 +3,7 @@ import { ships, staticData } from './state.js';
 import { shipCategory } from './categories.js';
 import { hdgBad, cogBad } from './heading.js';
 import { smoothMotionState, historicalState, targetTimestamp, PAST_TRAIL_OPACITY, reconcileFixCircles, removeFixCircles } from './smoothMotion.js';
+import { updateLabel } from './messages.js';
 
 // ── Visibility state ─────────────────────────────────────────────────────
 // Slider ceilings; at these values, the respective "max" filter is disabled.
@@ -13,6 +14,8 @@ export const FLOATING_DISPLAY_SLIDER_MAX = 1200;
 export const filterState = {
   trailSec: 600,
   leadSec: 300, // how far ahead to draw the smooth-motion lead line (smooth motion only)
+  smoothMotionTension: 1.0, // damps the smooth-motion Hermite tangent (0=hugs the straight chord, 1=full dead-reckoning distance/most bulge) — see buildSegment in smoothMotion.js
+  mapSource: 'dark', // see MAP_SOURCES in map.js
   minAgeSec: 0,
   maxAgeSec: 300,
   minLengthM: 0,
@@ -26,6 +29,14 @@ export const filterState = {
   showNonMoving: true,
   hideSpoofed: true,
   hideUnreliableNavStatus: false,
+  showLabels: false,
+  showAntenna: false,
+  displayCollapsed: false,
+  filtersCollapsed: false,
+  shipTypesCollapsed: false,
+  smoothMotionCollapsed: false,
+  boundsCollapsed: false,
+  debugCollapsed: false,
 };
 export const hiddenCategories = new Set(['unknown']);
 export const hiddenTypes = new Set();
@@ -138,16 +149,22 @@ export function isShipVisible(mmsi) {
   const isMoving  = isShipMoving(d.sog);
   const lengthOk  = lengthM == null || (lengthM >= filterState.minLengthM
     && (filterState.maxLengthM >= MAX_LENGTH_SLIDER_MAX || lengthM <= filterState.maxLengthM));
-  // Same gap-between-last-2-reports metric as the "Update interval" stat
-  // (or, with smooth motion on, the gap as of targetTs from historicalState).
-  // Only applies to moving ships; non-moving and fewer-than-2-report ships pass through unfiltered.
-  if (intervalSec === null) {
-    const ts = ship.timestamps;
-    intervalSec = ts.length >= 2 ? (ts[ts.length - 1] - ts[ts.length - 2]) / 1000 : null;
+  // Same gap-between-last-2-reports metric as the "Update interval" stat (the
+  // gap as of targetTs from historicalState, with smooth motion on). Only
+  // active while smooth motion is on — in live mode there's no meaningful
+  // "instant" to measure the gap against (a ship would just vanish the
+  // moment it reports), and only applies to moving ships; non-moving and
+  // fewer-than-2-report ships always pass through unfiltered.
+  let intervalOk = true;
+  if (smoothMotionState.enabled) {
+    if (intervalSec === null) {
+      const ts = ship.timestamps;
+      intervalSec = ts.length >= 2 ? (ts[ts.length - 1] - ts[ts.length - 2]) / 1000 : null;
+    }
+    intervalOk = !isMoving || intervalSec == null
+      || ((intervalSec >= filterState.minIntervalSec)
+        && (filterState.maxIntervalSec >= MAX_INTERVAL_SLIDER_MAX || intervalSec <= filterState.maxIntervalSec));
   }
-  const intervalOk = !isMoving || intervalSec == null
-    || ((intervalSec >= filterState.minIntervalSec)
-      && (filterState.maxIntervalSec >= MAX_INTERVAL_SLIDER_MAX || intervalSec <= filterState.maxIntervalSec));
   const movingOk = isMoving ? filterState.showMoving : filterState.showNonMoving;
   const navUnreliable = navStatusUnreliable(d.sog, d.navStatus);
   return ageOk && lengthOk && intervalOk && movingOk && !hiddenCategories.has(cat) && !(typeCode != null && hiddenTypes.has(typeCode)) && !(filterState.filterHdg000 && noHeading) && !(filterState.hideSpoofed && ship.spoofSuspected) && !(filterState.hideUnreliableNavStatus && navUnreliable);
@@ -160,6 +177,7 @@ export function applyVisibility(mmsi) {
 
   if (visible && !ship.onMap)      { ship.marker.addTo(map); ship.onMap = true; }
   if (!visible && ship.onMap)      { ship.marker.remove();   ship.onMap = false; }
+  updateLabel(mmsi);
 
   // While smooth motion is on, the straight-segment trail is replaced by the
   // smooth (kinematic) past line drawn in the smooth-motion loop — hide it.
