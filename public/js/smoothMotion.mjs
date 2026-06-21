@@ -1,4 +1,4 @@
-import { map } from './map.mjs';
+import { map, wrapLatLngNearCenter } from './map.mjs';
 import { ships, staticData, NAV_STATUS } from './state.mjs';
 import { shipIcon, pixelsPerMeter, speedDotZoomFactor, SPEED_DOT_SPACING } from './icons.mjs';
 import { bestHeading, bestCourse, cogBad, hdgBad, resolveHeading } from './heading.mjs';
@@ -327,7 +327,7 @@ function snapToLatest(mmsi, ship) {
   // d.lat/d.lon already IS the hull's middle (computed once on ingestion —
   // see updateShip in messages.mjs), so no re-deriving it here.
   ship.middle = [d.lat, d.lon];
-  ship.marker.setLatLng(ship.middle);
+  ship.marker.setLatLng(wrapLatLngNearCenter(ship.middle));
   ship.marker.setIcon(shipIcon(heading, dotAngle, d.sog, sd?.typeCode, sd?.dim, ship.isFloating));
   updateLabel(mmsi);
   removeAheadLine(ship);
@@ -355,7 +355,7 @@ function snapToSmooth(mmsi, ship, targetTs) {
   const headingAngle = snap.data.hdg ?? snap.data.cog ?? ship.lastGoodHeading ?? 0;
   const dotAngle = snap.data.cog ?? headingAngle;
   ship.middle = here;
-  ship.marker.setLatLng(ship.middle);
+  ship.marker.setLatLng(wrapLatLngNearCenter(ship.middle));
   ship.marker.setIcon(shipIcon(headingAngle, dotAngle, snap.data.sog, sd?.typeCode, dim, ship.isFloating));
   updateLabel(mmsi);
   ship.smoothIconHeading = headingAngle;
@@ -778,7 +778,7 @@ export function startSmoothMotionLoop(getTrailSec, getLeadSec, getShowFixes) {
       // `here` is already the hull's middle (historicalState interpolates
       // between history points stored as the middle).
       ship.middle = here;
-      ship.marker.setLatLng(ship.middle);
+      ship.marker.setLatLng(wrapLatLngNearCenter(ship.middle));
       updateLabel(mmsi);
 
       // hdg drives the bow's drawn orientation (fallback: cog, then the

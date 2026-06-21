@@ -1,4 +1,4 @@
-import { map } from './map.mjs';
+import { map, wrapLatLngNearCenter } from './map.mjs';
 import { ships, staticData, MAX_TRAIL_POINTS, NAV_STATUS } from './state.mjs';
 import { CATEGORIES, shipCategory } from './categories.mjs';
 import { shipIcon } from './icons.mjs';
@@ -37,7 +37,11 @@ function drawLabel(mmsi) {
   const ship = ships.get(mmsi);
   if (!ship) return;
   const name = filterState.showLabels ? (staticData.get(mmsi)?.name || ship.data.name || null) : null;
-  const middle = ship.middle || [ship.data.lat, ship.data.lon];
+  // Same shift the marker itself gets (see wrapLatLngNearCenter/map.mjs) —
+  // without it, the label would render at the ship's raw (un-shifted)
+  // longitude, in a different world-copy than its own marker whenever the
+  // view is panned far enough for that shift to matter.
+  const middle = wrapLatLngNearCenter(ship.middle || [ship.data.lat, ship.data.lon]);
   const visible = !labelsSuppressed && name && ship.onMap && map.getBounds().contains(middle);
   if (!visible) {
     if (ship.label) { ship.label.remove(); ship.label = null; }
@@ -165,7 +169,7 @@ export function refreshIcon(mmsi) {
     // that, this report stays uncorrected until the next one arrives with
     // dim known; no re-deriving the middle from here.
     ship.middle = [d.lat, d.lon];
-    ship.marker.setLatLng(ship.middle);
+    ship.marker.setLatLng(wrapLatLngNearCenter(ship.middle));
     ship.marker.setIcon(shipIcon(heading, dotAngle, d.sog, sd?.typeCode, sd?.dim, ship.isFloating));
   }
   ship.trail.setStyle({ color: ship.spoofSuspected ? '#ff4444' : CATEGORIES[shipCategory(sd?.typeCode)].color });
@@ -388,7 +392,7 @@ export function updateShip(msg) {
     const trail = L.polyline(positions, { color, weight: 1.5, opacity: 0.6 });
     // The marker sits at the hull's middle, not the raw antenna fix — both
     // the icon's rotation pivot and the popup anchor follow from this.
-    const marker = L.marker(middle, { icon: shipIcon(heading, dotAngle, data.sog, typeCode, dim, isFloating) });
+    const marker = L.marker(wrapLatLngNearCenter(middle), { icon: shipIcon(heading, dotAngle, data.sog, typeCode, dim, isFloating) });
     marker.bindPopup('', { maxWidth: 300 });
     marker.on('click', (e) => {
       L.DomEvent.stopPropagation(e);

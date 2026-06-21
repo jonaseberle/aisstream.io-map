@@ -1,4 +1,4 @@
-import { map } from './map.mjs';
+import { map, wrapLatLngNearCenter } from './map.mjs';
 import { ships, staticData, MAX_TRAIL_POINTS } from './state.mjs';
 import { CATEGORIES, shipCategory } from './categories.mjs';
 import { shipIcon } from './icons.mjs';
@@ -538,7 +538,7 @@ export function loadVesselData() {
       // data.lat/data.lon already IS the hull's middle — it was stored that
       // way (see updateShip in messages.mjs) before ever being saved here.
       const middle = [data.lat, data.lon];
-      const marker = L.marker(middle, { icon: shipIcon(heading, dotAngle, data.sog, sd?.typeCode, sd?.dim, isFloating) });
+      const marker = L.marker(wrapLatLngNearCenter(middle), { icon: shipIcon(heading, dotAngle, data.sog, sd?.typeCode, sd?.dim, isFloating) });
       marker.bindPopup('', { maxWidth: 300 });
       marker.on('click', (e) => { L.DomEvent.stopPropagation(e); marker.getPopup().setContent(buildPopup(mmsi)); marker.openPopup(); setFixesPanelShip(mmsi); });
       const ship = {

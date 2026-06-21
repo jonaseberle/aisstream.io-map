@@ -47,6 +47,22 @@ export function setMapSource(key) {
 }
 setMapSource('dark'); // default — legend.mjs re-applies the saved choice, if any, once it loads
 
+// Leaflet's tile layers repeat infinitely as you pan (no maxBounds/noWrap
+// set), but a marker only ever exists at its one literal longitude — pan
+// far enough to be looking at a repeated copy of the world and any marker
+// outside ±180° of THAT copy's center just isn't there. Shifting each
+// marker's longitude by the nearest multiple of 360° to the map's current
+// center renders it in whichever copy is actually on screen — always
+// exactly once, never duplicated, never missing — instead of leaving it
+// stuck wherever its raw, un-shifted longitude happens to fall.
+export function wrapLonNearCenter(lon) {
+  const center = map.getCenter().lng;
+  return lon + 360 * Math.round((center - lon) / 360);
+}
+export function wrapLatLngNearCenter([lat, lon]) {
+  return [lat, wrapLonNearCenter(lon)];
+}
+
 export function updateHash() {
   const c = map.getCenter();
   history.replaceState(null, '', `#${map.getZoom()}/${c.lat.toFixed(4)}/${c.lng.toFixed(4)}`);

@@ -1,4 +1,4 @@
-import { map, updateHash } from './map.mjs';
+import { map, updateHash, wrapLatLngNearCenter } from './map.mjs';
 import { ships } from './state.mjs';
 import { applyVisibility } from './visibility.mjs';
 import { refreshIcon, queueMessage } from './messages.mjs';
@@ -76,12 +76,40 @@ function initBoundsRectControls() {
   if (boundsRectState.bounds) drawBoundsRect(boundsRectState.bounds);
 }
 
+// Wraps to (-180, 180] — same reasoning as server.mjs's own copy: Leaflet's
+// map.getBounds() doesn't wrap longitude, so a view panned across the
+// antimeridian (±180°) has west/east outside the standard range (e.g.
+// west=170, east=190), while AIS positions are always normalized. Without
+// this, b.contains() below would wrongly hide ships near the antimeridian
+// whenever the view straddles it.
+function normalizeLon(lon) {
+  return ((lon + 540) % 360) - 180;
+}
+
 function updateBoundsVisibility() {
   const b = map.getBounds();
+  const south = b.getSouth(), north = b.getNorth();
+  const west = normalizeLon(b.getWest()), east = normalizeLon(b.getEast());
   for (const mmsi of ships.keys()) {
     const ship = ships.get(mmsi);
-    ship.inBounds = b.contains([ship.data.lat, ship.data.lon]);
+    const { lat, lon } = ship.data;
+    const lonOk = west <= east ? (lon >= west && lon <= east) : (lon >= west || lon <= east);
+    ship.inBounds = lat >= south && lat <= north && lonOk;
     applyVisibility(mmsi);
+  }
+}
+
+// Markers only get re-shifted into whichever world-copy is on screen (see
+// wrapLatLngNearCenter/map.mjs) when their own position is recomputed —
+// which, in live mode, only happens when a new message actually arrives
+// for that ship. Panning far enough to cross into a different copy without
+// new data for some ship would otherwise leave its marker stuck wherever
+// it last rendered, so re-apply the shift for every ship once the
+// pan/zoom settles (same debounce as the bounds update below — this is
+// just as cheap, and just as fine to defer to gesture-end).
+function rewrapAllMarkers() {
+  for (const ship of ships.values()) {
+    if (ship.onMap) ship.marker.setLatLng(wrapLatLngNearCenter(ship.middle));
   }
 }
 
@@ -90,6 +118,7 @@ function onMapMove() {
   updateHash();
   clearTimeout(boundsTimer);
   boundsTimer = setTimeout(() => {
+    rewrapAllMarkers();
     updateBoundsVisibility(); // live on-screen filtering — independent of the frozen subscription
     // While frozen, the subscription is deliberately pinned — panning/
     // zooming around to inspect it shouldn't re-send (or re-affirm) a

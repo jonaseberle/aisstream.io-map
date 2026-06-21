@@ -81,18 +81,41 @@ function parseAisTimeUtc(s) {
   return Number.isNaN(t) ? null : t;
 }
 
+// Wraps to (-180, 180] — Leaflet's map.getBounds() (client) doesn't wrap
+// longitude, so a view panned across the antimeridian (±180°) sends west/
+// east values outside the standard range (e.g. west=170, east=190) here.
+// Normalizing both ends means "west > east" becomes a single, reliable
+// signal for "this box wraps", used consistently below.
+function normalizeLon(lon) {
+  return ((lon + 540) % 360) - 180;
+}
+
 function inBounds(lat, lon) {
   if (!currentBounds) return true;
   const [[s, w], [n, e]] = currentBounds;
-  return lat >= s && lat <= n && lon >= w && lon <= e;
+  if (lat < s || lat > n) return false;
+  const west = normalizeLon(w), east = normalizeLon(e), x = normalizeLon(lon);
+  return west <= east ? (x >= west && x <= east) : (x >= west || x <= east);
 }
 
 const MESSAGE_TYPES = ['PositionReport', 'StandardClassBPositionReport', 'LongRangeAisBroadcastMessage', 'ShipStaticData'];
 
+// aisstream.io's BoundingBoxes expects ordinary (non-wrapping) rectangles —
+// a box crossing the antimeridian (west > east once normalized) is split
+// into the two ordinary boxes on either side of it instead of sent as one
+// box aisstream.io would likely misinterpret (or just return nothing for).
+function splitAntimeridian(bounds) {
+  const [[s, w], [n, e]] = bounds;
+  const west = normalizeLon(w), east = normalizeLon(e);
+  if (west <= east) return [[[s, west], [n, east]]];
+  return [[[s, west], [n, 180]], [[s, -180], [n, east]]];
+}
+
 function subscribe(bounds) {
+  const boxes = bounds ? splitAntimeridian(bounds) : [[[-90, -180], [90, 180]]];
   aisSocket.send(JSON.stringify({
     APIKey: API_KEY,
-    BoundingBoxes: [bounds ?? [[-90, -180], [90, 180]]],
+    BoundingBoxes: boxes,
     FilterMessageTypes: MESSAGE_TYPES,
   }));
 }
