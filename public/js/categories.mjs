@@ -56,7 +56,19 @@ export const CATEGORY_TYPES = {
   unknown:   [],
 };
 
+// Falls back to the decade's generic label (matching shipCategory's own
+// per-decade grouping above) for codes within a known category but not
+// individually listed in SHIP_TYPES — e.g. 89 has no specific meaning
+// beyond "Tanker" (the explicit 81-84 hazard-category codes are the only
+// ones that say more), so it should read "Tanker", not "Type 89".
 export function shipTypeLabel(code) {
   if (code == null) return null;
-  return SHIP_TYPES[code] ?? (code >= 20 && code <= 28 ? 'WIG' : code >= 40 && code <= 49 ? 'HSC' : `Type ${code}`);
+  if (SHIP_TYPES[code] != null) return SHIP_TYPES[code];
+  if (code >= 20 && code <= 29) return 'WIG';
+  if (code >= 40 && code <= 49) return 'HSC';
+  if (code >= 60 && code <= 69) return 'Passenger';
+  if (code >= 70 && code <= 79) return 'Cargo';
+  if (code >= 80 && code <= 89) return 'Tanker';
+  if (code >= 90 && code <= 99) return 'Other';
+  return `Type ${code}`;
 }

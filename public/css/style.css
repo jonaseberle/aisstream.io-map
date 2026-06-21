@@ -28,13 +28,13 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 #smooth-motion-slider { width: 100%; accent-color: var(--color-accent); cursor: pointer; }
 #freeze-bounds-label { display: flex; align-items: center; gap: 4px; cursor: pointer; color: var(--color-text); margin-right: 10px; }
 #freeze-bounds-label input { cursor: pointer; accent-color: var(--color-accent); }
-#reset-settings-button {
+#reset-settings-button, #clear-storage-button {
   padding: 4px 10px; font-size: 12px; font-family: inherit;
   background: var(--color-button-bg); color: var(--color-warn); border: 1px solid var(--color-danger-border); border-radius: 4px;
   cursor: pointer;
 }
-#reset-settings-button:hover { background: var(--color-danger-bg-hover); border-color: var(--color-status-error); color: var(--color-danger-text-hover); }
-#reset-settings-button:active { background: var(--color-danger-bg-active); }
+#reset-settings-button:hover, #clear-storage-button:hover { background: var(--color-danger-bg-hover); border-color: var(--color-status-error); color: var(--color-danger-text-hover); }
+#reset-settings-button:active, #clear-storage-button:active { background: var(--color-danger-bg-active); }
 #status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-status-default); flex-shrink: 0; }
 #status-dot.connected { background: var(--color-status-connected); }
 #status-dot.error { background: var(--color-status-error); }

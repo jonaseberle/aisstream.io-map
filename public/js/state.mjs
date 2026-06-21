@@ -8,5 +8,5 @@ export const NAV_STATUS = [
 
 // mmsi → { marker, trail, data, positions, timestamps, onMap, trailOnMap, spoofSuspected, maxImpliedKnots, inBounds, timedOut }
 export const ships = new Map();
-// mmsi → { typeCode, typeLabel, name, dim, draught, callSign, imo, destination }
+// mmsi → { typeCode, name, dim, draught, callSign, imo, destination }
 export const staticData = new Map();

@@ -5,7 +5,7 @@ import { ships } from './state.mjs';
 import { CATEGORIES, CATEGORY_TYPES, SHIP_TYPES } from './categories.mjs';
 import { shapeSvgInner } from './icons.mjs';
 import { filterState, hiddenCategories, hiddenTypes, applyVisibility, refreshTrail, MAX_AGE_SLIDER_MAX, MAX_LENGTH_SLIDER_MAX, MAX_INTERVAL_SLIDER_MAX, FLOATING_DISPLAY_SLIDER_MAX, MAX_TRAIL_SLIDER_SEC } from './visibility.mjs';
-import { saveVesselData } from './storage.mjs';
+import { clearVesselData, disableLocalStorage, saveVesselData } from './storage.mjs';
 import { scheduleLabelRecompute, refreshIcon } from './messages.mjs';
 import { saveSettings } from './settings.mjs';
 
@@ -459,21 +459,6 @@ function buildLegendContent() {
 
     const debugBody = mkGroup('Debug', 'debugCollapsed');
 
-    const statsRow = document.createElement('div');
-    statsRow.className = 'legend-row';
-    statsRow.innerHTML = `<span>Ships: <strong id="ship-count">0</strong></span>`;
-    debugBody.appendChild(statsRow);
-
-    const movingRow = document.createElement('div');
-    movingRow.className = 'legend-row';
-    movingRow.innerHTML = `<span>Moving: <strong id="moving-count">0</strong></span>`;
-    debugBody.appendChild(movingRow);
-
-    const singleObsRow = document.createElement('div');
-    singleObsRow.className = 'legend-row';
-    singleObsRow.innerHTML = `<span>Single obs.: <strong id="single-obs-count">0</strong></span>`;
-    debugBody.appendChild(singleObsRow);
-
     const intervalRow = document.createElement('div');
     intervalRow.className = 'legend-row';
     intervalRow.innerHTML = `<span>Last update interval (moving vessels): <br><strong id="avg-interval" title="p50 and p80 are percentiles: 50% (resp. 80%) of samples are at or below this value.">—</strong></span>`;
@@ -488,6 +473,53 @@ function buildLegendContent() {
       document.getElementById('flush-interval-label').textContent = `Message interval: ${filterState.messageFlushMs}ms`;
     });
     debugBody.appendChild(flushIntervalRow);
+
+    const limitStorageRow = document.createElement('div');
+    limitStorageRow.className = 'legend-slider';
+    limitStorageRow.innerHTML = `<label id="limit-storage-label" title="Proactively trims/evicts vessel data once a save would exceed this size — below the browser's own real quota, since saving/loading get noticeably slower long before that's actually hit. At 'off' (0), localStorage isn't used at all and any existing save is removed.">Limit localStorage: ${filterState.maxStorageKB === 0 ? 'off' : filterState.maxStorageKB + 'kB'}</label>
+      <input type="range" id="limit-storage-slider" min="0" max="10240" step="100" value="${filterState.maxStorageKB}">`;
+    limitStorageRow.querySelector('#limit-storage-slider').addEventListener('input', (e) => {
+      filterState.maxStorageKB = parseInt(e.target.value, 10);
+      document.getElementById('limit-storage-label').textContent =
+        filterState.maxStorageKB === 0 ? 'Limit localStorage: off' : `Limit localStorage: ${filterState.maxStorageKB}kB`;
+      if (filterState.maxStorageKB === 0) disableLocalStorage();
+    });
+    debugBody.appendChild(limitStorageRow);
+
+    debugBody.appendChild(mkCheckRow('compress-storage-checkbox', 'Compress localStorage data', filterState.compressStorage, (e) => {
+      filterState.compressStorage = e.target.checked;
+    }));
+
+    const evictedRow = document.createElement('div');
+    evictedRow.className = 'legend-row';
+    evictedRow.innerHTML = `<span>Evicted on last save: <strong id="debug-evicted">0 vessels, 0 fixes</strong></span>`;
+    debugBody.appendChild(evictedRow);
+
+    const storageKBRow = document.createElement('div');
+    storageKBRow.className = 'legend-row';
+    storageKBRow.innerHTML = `<span>localStorage used: <strong id="debug-storage-kb">0.0 kB</strong></span>`;
+    debugBody.appendChild(storageKBRow);
+
+    const quotaFailRow = document.createElement('div');
+    quotaFailRow.className = 'legend-row';
+    quotaFailRow.innerHTML = `<span title="The smallest save size that still hit a real browser storage error on the last save attempt — distinct from the 'Limit localStorage' slider above, which is a self-imposed cap, not the browser's own.">Browser couldn't save above: <strong id="debug-quota-fail-kb">—</strong></span>`;
+    debugBody.appendChild(quotaFailRow);
+
+    const saveNowButton = document.createElement('button');
+    saveNowButton.id = 'save-now-button';
+    saveNowButton.className = 'legend-button';
+    saveNowButton.title = 'Save current vessels/fixes to localStorage right away, instead of waiting for the next periodic save (every 30s)';
+    saveNowButton.textContent = 'Save now';
+    saveNowButton.addEventListener('click', () => saveVesselData());
+    debugBody.appendChild(saveNowButton);
+
+    const clearStorageButton = document.createElement('button');
+    clearStorageButton.id = 'clear-storage-button';
+    clearStorageButton.className = 'legend-button';
+    clearStorageButton.title = 'Remove all vessels and their AIS fixes, both from memory and from the localStorage save';
+    clearStorageButton.textContent = 'Clear localStorage';
+    clearStorageButton.addEventListener('click', () => clearVesselData());
+    debugBody.appendChild(clearStorageButton);
 
     const resetSep = document.createElement('div');
     resetSep.className = 'legend-sep';

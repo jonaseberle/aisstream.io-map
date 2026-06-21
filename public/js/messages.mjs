@@ -1,6 +1,6 @@
 import { map } from './map.mjs';
 import { ships, staticData, MAX_TRAIL_POINTS, NAV_STATUS } from './state.mjs';
-import { CATEGORIES, shipCategory, shipTypeLabel } from './categories.mjs';
+import { CATEGORIES, shipCategory } from './categories.mjs';
 import { shipIcon } from './icons.mjs';
 import { resolveHeading, cogBad, bestHeading } from './heading.mjs';
 import { SPOOF_SPEED_KNOTS, MIN_SPOOF_DISTANCE_NM, haversineKnots } from './spoof.mjs';
@@ -241,7 +241,7 @@ export function updateShip(msg) {
   if (msg._type === 'metaCache') {
     for (const [mmsi, m] of Object.entries(msg.data)) {
       staticData.set(mmsi, {
-        typeCode: m.typeCode, typeLabel: m.label, name: m.name,
+        typeCode: m.typeCode, name: m.name,
         dim: m.dim, draught: m.draught, callSign: m.callSign, imo: m.imo, destination: m.destination,
       });
       refreshIcon(mmsi);
@@ -252,10 +252,11 @@ export function updateShip(msg) {
   if (msg.MessageType === 'ShipStaticData') {
     const payload = msg.Message && Object.values(msg.Message)[0];
     const mmsi = String(payload?.UserID ?? msg.MetaData?.MMSI);
-    const typeCode = payload?.Type;
+    // No typeLabel stored — it's presentation, derived on demand from
+    // typeCode via shipTypeLabel (categories.mjs) wherever it's displayed,
+    // not kept as a redundant string alongside the code that produced it.
     staticData.set(mmsi, {
-      typeCode,
-      typeLabel: shipTypeLabel(typeCode),
+      typeCode: payload?.Type,
       name: payload?.Name?.trim() || msg.MetaData?.ShipName?.trim() || null,
       dim: payload?.Dimension ?? null,
       draught: payload?.MaximumStaticDraught ?? null,
@@ -280,7 +281,7 @@ export function updateShip(msg) {
   if (msg._meta) {
     const m = msg._meta;
     staticData.set(mmsi, {
-      typeCode: m.typeCode, typeLabel: m.label, name: m.name,
+      typeCode: m.typeCode, name: m.name,
       dim: m.dim, draught: m.draught, callSign: m.callSign, imo: m.imo, destination: m.destination,
     });
   }

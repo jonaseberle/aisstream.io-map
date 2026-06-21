@@ -72,6 +72,14 @@ let unloadSaveDone = false;
 function saveWithBanner() {
   unloadBanner.textContent = '💾 Saving...';
   unloadBanner.classList.add('visible');
+  // Best-effort nudge at an actual paint before the blocking save below —
+  // reading a layout property forces synchronous style/layout right now,
+  // which is necessary (though still not a guaranteed paint) for the
+  // browser to have any chance of showing this text before the page
+  // freezes. There's no way to *guarantee* a paint before a long
+  // synchronous block on the web platform — if compression (Debug:
+  // "Compress localStorage data") is on, this can still take a while.
+  void unloadBanner.offsetHeight;
   if (!unloadSaveDone) {
     unloadSaveDone = true;
     saveVesselDataSync();

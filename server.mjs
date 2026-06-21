@@ -56,28 +56,11 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-// Ship type code → human label (AIS type codes)
-const SHIP_TYPES = {
-  0: 'Not available',
-  20: 'WIG', 21: 'WIG (hazardous A)', 22: 'WIG (hazardous B)', 23: 'WIG (hazardous C)', 24: 'WIG (hazardous D)',
-  30: 'Fishing',
-  31: 'Towing', 32: 'Towing (large)',
-  33: 'Dredging', 34: 'Diving', 35: 'Military', 36: 'Sailing', 37: 'Pleasure craft',
-  40: 'HSC', 41: 'HSC (hazardous A)', 42: 'HSC (hazardous B)', 43: 'HSC (hazardous C)', 44: 'HSC (hazardous D)',
-  50: 'Pilot', 51: 'SAR', 52: 'Tug', 53: 'Port tender', 54: 'Anti-pollution',
-  55: 'Law enforcement', 58: 'Medical', 59: 'Non-combatant',
-  60: 'Passenger', 61: 'Passenger (hazardous A)', 62: 'Passenger (hazardous B)', 63: 'Passenger (hazardous C)', 64: 'Passenger (hazardous D)',
-  70: 'Cargo', 71: 'Cargo (hazardous A)', 72: 'Cargo (hazardous B)', 73: 'Cargo (hazardous C)', 74: 'Cargo (hazardous D)',
-  80: 'Tanker', 81: 'Tanker (hazardous A)', 82: 'Tanker (hazardous B)', 83: 'Tanker (hazardous C)', 84: 'Tanker (hazardous D)',
-  90: 'Other', 91: 'Other (hazardous A)', 92: 'Other (hazardous B)', 93: 'Other (hazardous C)', 94: 'Other (hazardous D)',
-};
-
-function shipTypeLabel(code) {
-  if (code == null) return null;
-  return SHIP_TYPES[code] ?? (code >= 20 && code <= 28 ? 'WIG' : code >= 40 && code <= 49 ? 'HSC' : `Type ${code}`);
-}
-
-// MMSI → { typeCode, label } from ShipStaticData messages
+// MMSI → { typeCode, name, dim, draught, callSign, imo, destination } from
+// ShipStaticData messages. typeCode is exactly what AIS delivers — turning
+// it into a human label ("Tanker", etc.) is presentation, not data, so
+// that's left to the client (categories.mjs's shipTypeLabel), not computed
+// or stored here.
 const shipMeta = new Map();
 
 const clients = new Set();
@@ -160,18 +143,17 @@ function connectToAIS() {
 
       if (msg.MessageType === 'ShipStaticData') {
         const typeCode = payload?.Type;
-        const label = shipTypeLabel(typeCode);
         const name = payload?.Name?.trim() || msg.MetaData?.ShipName?.trim() || null;
         const dim = payload?.Dimension ?? null;
         const draught = payload?.MaximumStaticDraught ?? null;
         const callSign = payload?.CallSign?.trim() || null;
         const imo = payload?.ImoNumber ?? null;
         const destination = payload?.Destination?.trim() || null;
-        shipMeta.set(mmsi, { typeCode, label, name, dim, draught, callSign, imo, destination });
+        shipMeta.set(mmsi, { typeCode, name, dim, draught, callSign, imo, destination });
         const length = dim ? (dim.A || 0) + (dim.B || 0) : null;
         const width  = dim ? (dim.C || 0) + (dim.D || 0) : null;
         const dimStr = length ? ` dim=${length}x${width}m draught=${draught}m` : '';
-        log(`[ShipStaticData] ${name || 'Unknown'} (${mmsi}) type=${typeCode} (${label})${dimStr}`);
+        log(`[ShipStaticData] ${name || 'Unknown'} (${mmsi}) type=${typeCode}${dimStr}`);
       } else {
         const name = msg.MetaData?.ShipName?.trim() || 'Unknown';
         const lat  = payload?.Latitude;
@@ -180,7 +162,7 @@ function connectToAIS() {
         const cog  = payload?.Cog;
         const hdg  = payload?.TrueHeading;
         const meta = shipMeta.get(mmsi);
-        const typeStr = meta ? ` type=${meta.typeCode} (${meta.label})` : '';
+        const typeStr = meta ? ` type=${meta.typeCode}` : '';
         const boundsStr = (lat != null && lon != null)
           ? (inBounds(lat, lon) ? ' [IN]' : ` [OUT bounds=${JSON.stringify(currentBounds)}]`)
           : ' [no coords]';

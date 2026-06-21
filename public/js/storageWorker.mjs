@@ -9,8 +9,10 @@
 importScripts('https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js');
 
 self.onmessage = (e) => {
-  const { id, shipsObj, staticObj } = e.data;
-  const shipsStr = LZString.compressToUTF16(JSON.stringify(shipsObj));
-  const staticStr = LZString.compressToUTF16(JSON.stringify(staticObj));
+  const { id, shipsObj, staticObj, compress } = e.data;
+  const shipsJson = JSON.stringify(shipsObj);
+  const staticJson = JSON.stringify(staticObj);
+  const shipsStr = compress ? LZString.compressToUTF16(shipsJson) : shipsJson;
+  const staticStr = compress ? LZString.compressToUTF16(staticJson) : staticJson;
   self.postMessage({ id, shipsStr, staticStr });
 };

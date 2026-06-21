@@ -4,7 +4,7 @@ import { CATEGORIES, shipCategory } from './categories.mjs';
 import { shipIcon } from './icons.mjs';
 import { resolveHeading, cogBad } from './heading.mjs';
 import { SPOOF_SPEED_KNOTS } from './spoof.mjs';
-import { applyVisibility, refreshTrail, isShipMoving, isShipFloating } from './visibility.mjs';
+import { applyVisibility, refreshTrail, isShipMoving, isShipFloating, filterState } from './visibility.mjs';
 import { buildPopup } from './popup.mjs';
 import { flushMessageQueue } from './messages.mjs';
 import { setFixesPanelShip } from './fixesPanel.mjs';
@@ -13,10 +13,44 @@ import { setFixesPanelShip } from './fixesPanel.mjs';
 export const STORAGE_KEY_SHIPS  = 'ais_ships';
 export const STORAGE_KEY_STATIC = 'ais_static';
 export const STORAGE_KEY_META   = 'ais_saved_at';
+// Whether STORAGE_KEY_SHIPS/STATIC are LZString-compressed — its own key
+// rather than a marker prefixed onto those values, so they stay exactly
+// what compressToUTF16/JSON.stringify produced (easier to eyeball/copy out
+// of devtools while debugging) instead of "valid JSON/LZString plus one
+// stray leading character."
+export const STORAGE_KEY_COMPRESSED = 'ais_compressed';
+// Identifies the packed-array record schema (packFix/packShip/packStatic
+// below) that STORAGE_KEY_SHIPS/STATIC were written with. Bump
+// STORAGE_FORMAT_VERSION whenever that schema changes (a field added/
+// removed/reordered) — loadVesselData refuses to unpack a mismatched
+// version rather than feeding the wrong-shaped arrays into today's
+// unpack functions, which would silently misread fields by position
+// instead of failing loudly.
+export const STORAGE_KEY_VERSION = 'ais_version';
+export const STORAGE_FORMAT_VERSION = 2; // v2: dropped the redundant typeLabel field from packStatic
 const STORAGE_TTL_MS = 2 * 60 * 60 * 1000; // prune data older than 2 h on load
 
 export const STORAGE_QUOTA_KB = 5 * 1024; // localStorage is typically limited to 5 MB
-export const storageState = { note: null }; // null = clean save; string = what was dropped/trimmed
+export const storageState = {
+  note: null,          // null = clean save; string = what was dropped/trimmed
+  evictedVessels: 0,   // vessels NOT included in the last successful save (dropped by eviction steps)
+  evictedFixes: 0,      // fixes NOT included in the last successful save (vessels dropped entirely + per-ship trimming)
+  usedKB: 0,            // size of the last successful save
+  quotaFailKB: null,    // smallest size that still hit a REAL browser QuotaExceededError during the last save attempt (null = none — distinct from filterState.maxStorageKB's own, user-configured limit)
+};
+
+// Debug-group rows (legend.mjs) showing the fields above — null-guarded
+// since that panel may currently be detached (a different side-panel tab
+// active; see stats.mjs's setText for the same situation/reasoning).
+function setDebugText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+function updateDebugStorageRows() {
+  setDebugText('debug-evicted', `${storageState.evictedVessels} vessels, ${storageState.evictedFixes} fixes`);
+  setDebugText('debug-storage-kb', `${storageState.usedKB.toFixed(1)} kB`);
+  setDebugText('debug-quota-fail-kb', storageState.quotaFailKB != null ? `${storageState.quotaFailKB.toFixed(0)} kB` : '—');
+}
 
 // Shows a note next to the connection status dot, so localStorage activity
 // (otherwise silent) is visible — a distinct color while a save/load is
@@ -85,6 +119,48 @@ function showIdleStorageIndicator() {
   setStorageIndicator(`🕐`);
 }
 
+// Wipes every vessel/fix the app currently knows about — both the live
+// in-memory state (ships/staticData, plus every Leaflet layer a ship owns:
+// marker, trail, label, smooth-motion lead/past lines+ticks, fix circles)
+// and the persisted localStorage save. Used by the Debug "Clear localStorage"
+// button — a fresh start, not just clearing what would be written on the
+// next save.
+export function clearVesselData() {
+  for (const ship of ships.values()) {
+    ship.marker?.remove();
+    ship.trail?.remove();
+    ship.label?.remove();
+    ship.smoothAheadLine?.remove();
+    ship.smoothPastLine?.remove();
+    if (ship.smoothAheadMarks) for (const m of ship.smoothAheadMarks) m.remove();
+    if (ship.smoothPastMarks) for (const m of ship.smoothPastMarks) m.remove();
+    if (ship.fixCircles) for (const m of ship.fixCircles.values()) m.remove();
+  }
+  ships.clear();
+  staticData.clear();
+  removeSavedData();
+}
+
+function removeSavedData() {
+  localStorage.removeItem(STORAGE_KEY_SHIPS);
+  localStorage.removeItem(STORAGE_KEY_STATIC);
+  localStorage.removeItem(STORAGE_KEY_META);
+  localStorage.removeItem(STORAGE_KEY_COMPRESSED);
+  localStorage.removeItem(STORAGE_KEY_VERSION);
+  storageState.note = null;
+  clearTimeout(flashTimer); // don't let a stale pending flash (e.g. an earlier "Load failed") repaint over this
+  showIdleStorageIndicator();
+}
+
+// filterState.maxStorageKB === 0 ("off", left end of the Debug slider) means
+// localStorage is not used at all, not just "no proactive limit" — called
+// from the slider's own input handler (legend.mjs) the instant it's
+// dragged to 0, so the existing save is gone immediately rather than
+// lingering until whatever was last written naturally expires.
+export function disableLocalStorage() {
+  removeSavedData();
+}
+
 // Progressively more aggressive eviction states tried on QuotaExceededError,
 // shared by both the sync and worker-based save below — yields the
 // {shipsToSave, saveStatic, maxPoints, step} to try next, ending the
@@ -112,28 +188,99 @@ function* evictionSteps() {
   }
 }
 
+// ── Compact array-based record format ───────────────────────────────────
+// A saved fix/ship/static-data record as a plain {lat, lon, sog, ...}
+// object repeats every one of those key names in the JSON for every single
+// fix — across a few thousand fixes that's most of the saved size. Packing
+// each record into a plain positional array instead (decoded via the
+// FIX_*/SHIP_*/STATIC_* index constants below, so the access sites still
+// read like field names despite the data itself having none) cuts all of
+// that out. The mmsi → record mapping itself stays a plain object/dict
+// (mmsi is a real lookup key, not a fixed-schema field to compact away).
+const FIX_LAT = 0, FIX_LON = 1, FIX_SOG = 2, FIX_COG = 3, FIX_HDG = 4,
+      FIX_NAV_STATUS = 5, FIX_DECLINATION = 6, FIX_TS = 7, FIX_HEADING_RELIABLE = 8, FIX_UNRELIABLE_REASON = 9;
+
+function packFix(h) {
+  return [
+    +h.lat.toFixed(4), +h.lon.toFixed(4), h.sog, h.cog, h.hdg, h.navStatus, h.declination,
+    h.ts, h.headingReliable, h.unreliableReason ?? null,
+  ];
+}
+function unpackFix(a) {
+  return {
+    lat: a[FIX_LAT], lon: a[FIX_LON], sog: a[FIX_SOG], cog: a[FIX_COG], hdg: a[FIX_HDG],
+    navStatus: a[FIX_NAV_STATUS], declination: a[FIX_DECLINATION], ts: a[FIX_TS],
+    headingReliable: a[FIX_HEADING_RELIABLE], unreliableReason: a[FIX_UNRELIABLE_REASON],
+  };
+}
+
+// No name field here — it's already saved once, under the same mmsi key,
+// in ais_static (see packStatic/STATIC_NAME below); unpackShip's caller
+// (loadVesselData) passes that looked-up name back in rather than this
+// carrying its own redundant copy.
+const SHIP_LAT = 0, SHIP_LON = 1, SHIP_SOG = 2, SHIP_COG = 3, SHIP_HDG = 4,
+      SHIP_NAV_STATUS = 5, SHIP_DECLINATION = 6, SHIP_TS = 7,
+      SHIP_SPOOF_SUSPECTED = 8, SHIP_MAX_IMPLIED_KNOTS = 9, SHIP_HISTORY = 10;
+
+// d (ship.data) is the live snapshot — lat/lon here are already the hull's
+// middle, and the real per-point cog/sog/hdg/navStatus/declination are
+// saved verbatim (in history, below) so a reload doesn't need to fabricate
+// them (see unpackShip/loadVesselData).
+function packShip(ship, maxPoints) {
+  const d = ship.data;
+  return [
+    +d.lat.toFixed(4), +d.lon.toFixed(4), d.sog, d.cog, d.hdg, d.navStatus, d.declination, d.ts,
+    ship.spoofSuspected || false, ship.maxImpliedKnots || 0,
+    ship.history.slice(-maxPoints).map(packFix),
+  ];
+}
+function unpackShip(mmsi, a, name) {
+  return {
+    data: {
+      mmsi, name: name ?? null, lat: a[SHIP_LAT], lon: a[SHIP_LON], sog: a[SHIP_SOG], cog: a[SHIP_COG],
+      hdg: a[SHIP_HDG], navStatus: a[SHIP_NAV_STATUS], declination: a[SHIP_DECLINATION], ts: a[SHIP_TS],
+    },
+    spoofSuspected: a[SHIP_SPOOF_SUSPECTED],
+    maxImpliedKnots: a[SHIP_MAX_IMPLIED_KNOTS],
+    history: a[SHIP_HISTORY].map(unpackFix),
+  };
+}
+
+// No typeLabel field — it's presentation, derived on demand from typeCode
+// via shipTypeLabel (categories.mjs) wherever it's displayed, not a
+// redundant string saved alongside the code that produces it.
+const STATIC_TYPE_CODE = 0, STATIC_NAME = 1, STATIC_DIM = 2,
+      STATIC_DRAUGHT = 3, STATIC_CALL_SIGN = 4, STATIC_IMO = 5, STATIC_DESTINATION = 6;
+
+// dim ({A,B,C,D}, bow/stern/port/starboard distances from the GPS antenna)
+// packs to its own [A,B,C,D] array for the same reason as everything else
+// here — it's a fixed, known shape, just nested one level deeper.
+function packStatic(meta) {
+  return [
+    meta.typeCode ?? null, meta.name ?? null,
+    meta.dim ? [meta.dim.A ?? 0, meta.dim.B ?? 0, meta.dim.C ?? 0, meta.dim.D ?? 0] : null,
+    meta.draught ?? null, meta.callSign ?? null, meta.imo ?? null, meta.destination ?? null,
+  ];
+}
+function unpackStatic(a) {
+  const dim = a[STATIC_DIM];
+  return {
+    typeCode: a[STATIC_TYPE_CODE], name: a[STATIC_NAME],
+    dim: dim ? { A: dim[0], B: dim[1], C: dim[2], D: dim[3] } : null,
+    draught: a[STATIC_DRAUGHT], callSign: a[STATIC_CALL_SIGN], imo: a[STATIC_IMO], destination: a[STATIC_DESTINATION],
+  };
+}
+
 // Plain-data snapshot for one eviction attempt — cheap (just copying/
-// rounding numbers), unlike the JSON.stringify+compress step that follows
-// it, which is the actual expensive part (see saveVesselData below).
+// rounding/packing numbers), unlike the JSON.stringify+compress step that
+// follows it, which is the actual expensive part (see saveVesselData below).
 function buildSavePayload(shipsToSave, saveStatic, maxPoints) {
   const shipsObj = {};
-  for (const [mmsi, ship] of shipsToSave) {
-    const d = ship.data;
-    shipsObj[mmsi] = {
-      data: { ...d, lat: +d.lat.toFixed(4), lon: +d.lon.toFixed(4) },
-      // The real per-point cog/sog/hdg/navStatus/declination — saved
-      // verbatim so a reload doesn't need to fabricate them (see
-      // loadVesselData). lat/lon here are already the hull's middle.
-      history: ship.history.slice(-maxPoints).map((h) => ({
-        lat: +h.lat.toFixed(4), lon: +h.lon.toFixed(4),
-        sog: h.sog, cog: h.cog, hdg: h.hdg, navStatus: h.navStatus, declination: h.declination,
-        ts: h.ts, headingReliable: h.headingReliable, unreliableReason: h.unreliableReason ?? null,
-      })),
-      spoofSuspected: ship.spoofSuspected || false,
-      maxImpliedKnots: ship.maxImpliedKnots || 0,
-    };
+  for (const [mmsi, ship] of shipsToSave) shipsObj[mmsi] = packShip(ship, maxPoints);
+  const staticObj = {};
+  if (saveStatic) {
+    for (const [mmsi, meta] of staticData) staticObj[mmsi] = packStatic(meta);
   }
-  const staticObj = saveStatic ? Object.fromEntries(staticData) : {};
   return { shipsObj, staticObj };
 }
 
@@ -141,16 +288,74 @@ function isQuotaError(e) {
   return e.name === 'QuotaExceededError' || e.code === 22;
 }
 
-function commitSave(shipsStr, staticStr, step, maxPoints) {
-  localStorage.setItem(STORAGE_KEY_SHIPS,  shipsStr);
-  localStorage.setItem(STORAGE_KEY_STATIC, staticStr);
-  localStorage.setItem(STORAGE_KEY_META,   String(Date.now()));
+// Tracks the smallest payload size that still hit a REAL browser quota
+// error (e.attemptedKB, set only by commitSave's own setItem failure — not
+// by checkUserStorageLimit's lookalike) across one save attempt's eviction
+// retries — eviction shrinks the payload each step, so this ends up being
+// "the floor the browser itself enforced," distinct from the user's own
+// configured limit.
+function trackQuotaFailure(e) {
+  if (e.attemptedKB == null) return;
+  storageState.quotaFailKB = storageState.quotaFailKB == null
+    ? e.attemptedKB
+    : Math.min(storageState.quotaFailKB, e.attemptedKB);
+}
+
+// The browser's real quota (~5MB) is far past where saving/loading actually
+// start feeling laggy (compressing/decompressing a large JSON blob is real
+// CPU work) — filterState.maxStorageKB (Debug slider, default 5000) lets
+// the user cap it well below that. (0 disables localStorage entirely —
+// handled separately, by saveVesselData/saveVesselDataSync returning before
+// they ever reach this.) Reuses the SAME progressive eviction loop the real
+// QuotaExceededError path already drives, by throwing a lookalike error
+// isQuotaError() recognizes, rather than a second eviction mechanism.
+function checkUserStorageLimit(shipsStr, staticStr) {
+  const limitKB = filterState.maxStorageKB;
+  if (!limitKB) return;
+  const usedKB = (shipsStr.length + staticStr.length) / 1024;
+  if (usedKB > limitKB) {
+    const err = new Error(`Save (${usedKB.toFixed(0)}kB) exceeds the configured ${limitKB}kB limit`);
+    err.code = 22;
+    err.userLimit = true; // distinguishes from a REAL browser QuotaExceededError below
+    throw err;
+  }
+}
+
+function commitSave(shipsStr, staticStr, step, maxPoints, shipsToSave, compressed) {
+  const sizeKB = (shipsStr.length + staticStr.length) / 1024;
+  try {
+    localStorage.setItem(STORAGE_KEY_SHIPS,  shipsStr);
+    localStorage.setItem(STORAGE_KEY_STATIC, staticStr);
+    localStorage.setItem(STORAGE_KEY_META,   String(Date.now()));
+    // Own key (not a prefix baked into the values above) — see
+    // STORAGE_KEY_COMPRESSED's own comment for why; read by loadVesselData
+    // instead of guessing from decompressFromUTF16's return value, which
+    // doesn't reliably signal "this wasn't compressed": fed plain JSON, it
+    // neither throws nor returns null/empty, just garbage, which then fails
+    // JSON.parse and surfaced as a hard "Load failed" even though the save
+    // itself was perfectly fine.
+    localStorage.setItem(STORAGE_KEY_COMPRESSED, String(compressed));
+    localStorage.setItem(STORAGE_KEY_VERSION, String(STORAGE_FORMAT_VERSION));
+  } catch (e) {
+    e.attemptedKB = sizeKB; // read by the eviction loop's catch — only set here, so it's never confused with checkUserStorageLimit's own (synthetic) failure
+    throw e;
+  }
   const parts = [];
   if (step >= 1) parts.push('dropped no-static vessels');
   if (step >= 2) parts.push('non-moving vessels');
   if (step >= 3) parts.push('static data');
   if (maxPoints < MAX_TRAIL_POINTS) parts.push(`trimmed to ${maxPoints} pts/ship`);
   storageState.note = parts.length ? parts.join(', ') : null;
+
+  let totalFixes = 0;
+  for (const ship of ships.values()) totalFixes += ship.history.length;
+  let savedFixes = 0;
+  for (const [, ship] of shipsToSave) savedFixes += Math.min(ship.history.length, maxPoints);
+  storageState.evictedVessels = ships.size - shipsToSave.size;
+  storageState.evictedFixes = totalFixes - savedFixes;
+  storageState.usedKB = sizeKB;
+  updateDebugStorageRows();
+
   flashStorageIndicator(storageState.note ? `✅ Saved (${storageState.note})` : '✅ Saved');
 }
 
@@ -158,6 +363,7 @@ function reportSaveFailed(e) {
   if (e) console.warn('localStorage save failed:', e.message);
   else console.warn('localStorage: cannot fit data even after full eviction');
   storageState.note = 'save failed';
+  updateDebugStorageRows();
   flashStorageIndicator('⚠️ Save failed', 'error');
 }
 
@@ -170,7 +376,7 @@ function reportSaveFailed(e) {
 // Only the stringify+compress step is offloaded to storageWorker.mjs.
 let worker = null;
 let nextRequestId = 0;
-function compressInWorker(shipsObj, staticObj) {
+function compressInWorker(shipsObj, staticObj, compress) {
   if (!worker) worker = new Worker(new URL('./storageWorker.mjs', import.meta.url));
   return new Promise((resolve, reject) => {
     const id = ++nextRequestId;
@@ -187,7 +393,7 @@ function compressInWorker(shipsObj, staticObj) {
     };
     worker.addEventListener('message', onMessage);
     worker.addEventListener('error', onError);
-    worker.postMessage({ id, shipsObj, staticObj });
+    worker.postMessage({ id, shipsObj, staticObj, compress });
   });
 }
 
@@ -197,8 +403,11 @@ function compressInWorker(shipsObj, staticObj) {
 let saveInFlight = false;
 
 export async function saveVesselData() {
+  if (filterState.maxStorageKB === 0) return; // disabled — disableLocalStorage() already removed any existing save
   if (saveInFlight) return;
   saveInFlight = true;
+  storageState.quotaFailKB = null; // fresh per attempt — see trackQuotaFailure
+  const compress = filterState.compressStorage; // fixed for this whole attempt, even if the checkbox changes mid-save
   try {
     // Apply any messages still sitting in the batch queue first — otherwise
     // a save could persist stale ship state that's about to change the
@@ -208,11 +417,13 @@ export async function saveVesselData() {
     for (const { shipsToSave, saveStatic, maxPoints, step } of evictionSteps()) {
       try {
         const { shipsObj, staticObj } = buildSavePayload(shipsToSave, saveStatic, maxPoints);
-        const { shipsStr, staticStr } = await compressInWorker(shipsObj, staticObj);
-        commitSave(shipsStr, staticStr, step, maxPoints);
+        const { shipsStr, staticStr } = await compressInWorker(shipsObj, staticObj, compress);
+        checkUserStorageLimit(shipsStr, staticStr);
+        commitSave(shipsStr, staticStr, step, maxPoints, shipsToSave, compress);
         return;
       } catch (e) {
         if (!isQuotaError(e)) { reportSaveFailed(e); return; }
+        trackQuotaFailure(e);
       }
     }
     reportSaveFailed(null);
@@ -228,43 +439,78 @@ export async function saveVesselData() {
 // time there. A user is already navigating away at that point, so blocking
 // briefly is the right tradeoff for not losing the last few seconds of data.
 export function saveVesselDataSync() {
+  if (filterState.maxStorageKB === 0) return; // disabled — disableLocalStorage() already removed any existing save
+  storageState.quotaFailKB = null; // fresh per attempt — see trackQuotaFailure
+  const compress = filterState.compressStorage; // fixed for this whole attempt
   flushMessageQueue();
   setStorageIndicator('💾 Saving…', 'busy');
   for (const { shipsToSave, saveStatic, maxPoints, step } of evictionSteps()) {
     try {
       const { shipsObj, staticObj } = buildSavePayload(shipsToSave, saveStatic, maxPoints);
-      const shipsStr  = LZString.compressToUTF16(JSON.stringify(shipsObj));
-      const staticStr = LZString.compressToUTF16(JSON.stringify(staticObj));
-      commitSave(shipsStr, staticStr, step, maxPoints);
+      const shipsJson  = JSON.stringify(shipsObj);
+      const staticJson = JSON.stringify(staticObj);
+      // Compression here runs synchronously on the main thread (this is the
+      // one save path that can't offload to the worker — see the comment
+      // above saveVesselDataSync) — that's real, unavoidable CPU time when
+      // compress is on. main.mjs's saveWithBanner shows "Saving..." and
+      // forces a layout flush right before calling this, as a best-effort
+      // mitigation; there's no way to *guarantee* a paint before a long
+      // synchronous block on the web platform.
+      const shipsStr  = compress ? LZString.compressToUTF16(shipsJson)  : shipsJson;
+      const staticStr = compress ? LZString.compressToUTF16(staticJson) : staticJson;
+      checkUserStorageLimit(shipsStr, staticStr);
+      commitSave(shipsStr, staticStr, step, maxPoints, shipsToSave, compress);
       return;
     } catch (e) {
       if (!isQuotaError(e)) { reportSaveFailed(e); return; }
+      trackQuotaFailure(e);
     }
   }
   reportSaveFailed(null);
 }
 
 export function loadVesselData() {
+  if (filterState.maxStorageKB === 0) { showIdleStorageIndicator(); return; }
   try {
     const savedAt = parseInt(localStorage.getItem(STORAGE_KEY_META) ?? '0', 10);
     if (!savedAt || Date.now() - savedAt > STORAGE_TTL_MS) { showIdleStorageIndicator(); return; }
+    // A missing/mismatched version means this save predates today's
+    // packFix/packShip/packStatic schema (or a future one) — unpacking it
+    // with the wrong index constants would silently misread fields by
+    // position rather than failing loudly, so just treat it as nothing to
+    // load (same as an expired save) instead of guessing.
+    const version = parseInt(localStorage.getItem(STORAGE_KEY_VERSION) ?? '0', 10);
+    if (version !== STORAGE_FORMAT_VERSION) { showIdleStorageIndicator(); return; }
     setStorageIndicator('📂 Loading…', 'busy');
     const cutoff  = Date.now() - STORAGE_TTL_MS;
 
+    // Set alongside the save itself (commitSave) — undefined for a save from
+    // before this key existed, in which case isCompressed stays false below
+    // and the plain-JSON-first fallback chain in lzParse handles it.
+    const isCompressed = localStorage.getItem(STORAGE_KEY_COMPRESSED) === 'true';
     const lzParse = (raw) => {
       if (!raw) return null;
-      const dec = LZString.decompressFromUTF16(raw);
-      return JSON.parse(dec ?? raw); // fall back to plain JSON if not compressed
+      if (isCompressed) return JSON.parse(LZString.decompressFromUTF16(raw));
+      // Plain JSON is the expectation now (compressStorage defaults to
+      // off) — but for a pre-STORAGE_KEY_COMPRESSED save that was actually
+      // compressed, fall back to decompressing.
+      try { return JSON.parse(raw); } catch (_) {}
+      return JSON.parse(LZString.decompressFromUTF16(raw));
     };
 
     const staticRaw = localStorage.getItem(STORAGE_KEY_STATIC);
     if (staticRaw) {
-      for (const [mmsi, meta] of Object.entries(lzParse(staticRaw))) staticData.set(mmsi, meta);
+      for (const [mmsi, packed] of Object.entries(lzParse(staticRaw))) staticData.set(mmsi, unpackStatic(packed));
     }
 
     const shipsRaw = localStorage.getItem(STORAGE_KEY_SHIPS);
     if (!shipsRaw) { flashStorageIndicator('🕐 Nothing to load'); return; }
-    for (const [mmsi, saved] of Object.entries(lzParse(shipsRaw))) {
+    for (const [mmsi, packed] of Object.entries(lzParse(shipsRaw))) {
+      // Static data (just loaded, above) is the name source on reload — no
+      // need for the ship record to carry its own copy of a name that's
+      // already sitting in ais_static under the same mmsi key.
+      const sd    = staticData.get(mmsi);
+      const saved = unpackShip(mmsi, packed, sd?.name);
       // The real per-point cog/sog/hdg/navStatus/declination are persisted
       // verbatim (see saveVesselData) — no fabricating them from position
       // deltas. Older saves (before this) won't have `history` at all;
@@ -276,7 +522,6 @@ export function loadVesselData() {
       const timestamps = history.map((h) => h.ts);
 
       const data  = saved.data;
-      const sd    = staticData.get(mmsi);
       const cat   = shipCategory(sd?.typeCode);
       const color = CATEGORIES[cat].color;
       // Reflects only the latest (most recently saved) fix, same as

@@ -18,6 +18,8 @@ export const filterState = {
   smoothMotionTension: 1.0, // damps the smooth-motion Hermite tangent (0=hugs the straight chord, 1=full dead-reckoning distance/most bulge) — see buildSegment in smoothMotion.mjs
   mapSource: 'dark', // see MAP_SOURCES in map.mjs
   messageFlushMs: 1000, // how often queued incoming AIS messages are parsed+rendered — see flushMessageQueue in messages.mjs
+  maxStorageKB: 10240, // 0 = localStorage disabled entirely — see storage.mjs's checkUserStorageLimit/disableLocalStorage
+  compressStorage: false, // LZString-compress the localStorage save — see storage.mjs's compressInWorker/saveVesselDataSync. Off by default: compression is real CPU work, and the unload-time save (saveVesselDataSync) can't offload it to a worker, so it's the main cause of the multi-second freeze-with-no-feedback on reload/close.
   minAgeSec: 0,
   maxAgeSec: 300,
   minLengthM: 0,

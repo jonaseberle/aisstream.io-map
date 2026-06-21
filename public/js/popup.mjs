@@ -1,4 +1,5 @@
 import { ships, staticData, NAV_STATUS } from './state.mjs';
+import { shipTypeLabel } from './categories.mjs';
 import { bestHeading, hdgBad, cogBad } from './heading.mjs';
 import { SPOOF_SPEED_KNOTS } from './spoof.mjs';
 import { filterState, navStatusUnreliable } from './visibility.mjs';
@@ -35,7 +36,7 @@ export function buildPopup(mmsi) {
   const name = sd?.name || ship.data.name || '—';
   const navLabel = NAV_STATUS[d.navStatus] ?? 'Unknown';
   const navUnreliable = navStatusUnreliable(d.sog, d.navStatus);
-  const typeStr = sd?.typeCode != null ? `type=${sd.typeCode} (${sd.typeLabel})` : '— (no static data yet)';
+  const typeStr = sd?.typeCode != null ? `${shipTypeLabel(sd.typeCode)} (${sd.typeCode})` : '— (no static data yet)';
 
   // Dimensions: A=bow, B=stern, C=port, D=starboard (all from GPS antenna)
   const dim = sd?.dim;

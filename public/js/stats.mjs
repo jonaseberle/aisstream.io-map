@@ -24,31 +24,19 @@ export function startStatsLoop() {
     setText('msg-rate', msgCount);
     msgCount = 0;
 
-    let visibleCount = 0, movingCount = 0, singleObsCount = 0;
     const intervalSamples = [];
 
     for (const [mmsi, ship] of ships) {
       if (!ship.inBounds || !isShipVisible(mmsi)) continue;
-      visibleCount++;
-
-      const d = ship.data;
-      const isMoving = isShipMoving(d.sog);
-      if (isMoving) {
-        movingCount++;
-        const ts = ship.timestamps;
-        if (ts.length === 1) singleObsCount++;
-        // Gap between the last two position reports only — not the age of
-        // the most recent one, so a ship that just went quiet doesn't skew
-        // this toward "now minus last report".
-        if (ts.length >= 2) {
-          intervalSamples.push(ts[ts.length - 1] - ts[ts.length - 2]);
-        }
+      if (!isShipMoving(ship.data.sog)) continue;
+      // Gap between the last two position reports only — not the age of
+      // the most recent one, so a ship that just went quiet doesn't skew
+      // this toward "now minus last report".
+      const ts = ship.timestamps;
+      if (ts.length >= 2) {
+        intervalSamples.push(ts[ts.length - 1] - ts[ts.length - 2]);
       }
     }
-
-    setText('ship-count', visibleCount);
-    setText('moving-count', movingCount);
-    setText('single-obs-count', singleObsCount);
 
     const avgEl = document.getElementById('avg-interval');
     if (!avgEl) {
