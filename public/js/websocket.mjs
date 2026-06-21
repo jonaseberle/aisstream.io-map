@@ -17,63 +17,233 @@ function setStatus(className, text) {
 }
 let activeWs = null;
 
-// Outline of the bounding box currently subscribed to on aisstream.io —
-// drawn (and redrawn) every time we actually send a new one to the server,
-// so it always reflects what the upstream subscription is using right now.
-// Can be frozen via the checkbox below to inspect a past box without it
-// jumping to the current view — the actual subscription keeps updating either way.
-// `bounds` is kept here (and persisted via settings.mjs) so the outline can be
-// redrawn immediately on page load, before the websocket even connects.
-let boundsRect = null;
-export const boundsRectState = { frozen: false, bounds: null };
+// Areas the user has explicitly drawn on the map to subscribe to — each is
+// a box [[s,w],[n,e]]. An empty list means "no restriction", i.e. subscribe
+// to the whole world (same as what the server itself falls back to when no
+// boxes are sent). Persisted via settings.mjs so the outlines can be redrawn
+// immediately on page load, before the websocket even connects.
+export const boundsRectState = { areas: [] };
 
-function drawBoundsRect(bounds) {
-  const [[s, w], [n, e]] = bounds;
-  if (!boundsRect) {
-    boundsRect = L.rectangle([[s, w], [n, e]], {
-      color: '#fbbf24', weight: 1.5, opacity: 0.8, fill: false, dashArray: '6,4', interactive: false,
-    }).addTo(map);
-  } else {
-    boundsRect.setBounds([[s, w], [n, e]]);
+let areaOutline = null; // single multi-line layer tracing the union of all areas (not one outline per area, so overlapping/adjacent areas don't show crisscrossing interior lines)
+
+// Axis-aligned rectangles only, so their union's boundary is computable
+// exactly by coordinate-compressing into a grid, marking which cells are
+// covered by at least one box, then keeping only the cell edges that sit
+// between a covered and an uncovered cell (or the outside) — those are
+// exactly the segments of the union's outline. Adjacent same-direction
+// edges are merged into single runs so the dash pattern doesn't restart at
+// every grid line.
+function unionOutlineSegments(areas) {
+  if (areas.length === 0) return [];
+  const xs = [...new Set(areas.flatMap(([[, w], [, e]]) => [w, e]))].sort((a, b) => a - b);
+  const ys = [...new Set(areas.flatMap(([[s], [n]]) => [s, n]))].sort((a, b) => a - b);
+  const nx = xs.length - 1, ny = ys.length - 1;
+  if (nx <= 0 || ny <= 0) return [];
+
+  const covered = Array.from({ length: ny }, () => new Array(nx).fill(false));
+  for (const [[s, w], [n, e]] of areas) {
+    for (let j = 0; j < ny; j++) {
+      const cy = (ys[j] + ys[j + 1]) / 2;
+      if (cy < s || cy > n) continue;
+      for (let i = 0; i < nx; i++) {
+        const cx = (xs[i] + xs[i + 1]) / 2;
+        if (cx < w || cx > e) continue;
+        covered[j][i] = true;
+      }
+    }
   }
+
+  const segments = [];
+
+  // Horizontal edges, one scan per grid line, merging contiguous runs along x.
+  for (let j = 0; j <= ny; j++) {
+    let runStart = null;
+    for (let i = 0; i <= nx; i++) {
+      const below = j > 0 && i < nx && covered[j - 1][i];
+      const above = j < ny && i < nx && covered[j][i];
+      if (i < nx && below !== above) {
+        if (runStart === null) runStart = i;
+      } else if (runStart !== null) {
+        segments.push([[ys[j], xs[runStart]], [ys[j], xs[i]]]);
+        runStart = null;
+      }
+    }
+  }
+
+  // Vertical edges, one scan per grid line, merging contiguous runs along y.
+  for (let i = 0; i <= nx; i++) {
+    let runStart = null;
+    for (let j = 0; j <= ny; j++) {
+      const left = i > 0 && j < ny && covered[j][i - 1];
+      const right = i < nx && j < ny && covered[j][i];
+      if (j < ny && left !== right) {
+        if (runStart === null) runStart = j;
+      } else if (runStart !== null) {
+        segments.push([[ys[runStart], xs[i]], [ys[j], xs[i]]]);
+        runStart = null;
+      }
+    }
+  }
+
+  return segments;
 }
 
-function showSubscribedBounds(bounds) {
-  if (boundsRectState.frozen) return; // don't move the outline, or overwrite the persisted snapshot, while frozen
-  boundsRectState.bounds = bounds;
-  drawBoundsRect(bounds);
+function redrawAreaRects() {
+  if (areaOutline) { map.removeLayer(areaOutline); areaOutline = null; }
+  const segments = unionOutlineSegments(boundsRectState.areas);
+  if (segments.length > 0) {
+    areaOutline = L.polyline(segments, {
+      color: '#fbbf24', weight: 1.5, opacity: 0.8, dashArray: '6,4', interactive: false,
+    }).addTo(map);
+  }
+  updateBoundsWarning();
+}
+
+function updateBoundsWarning() {
+  const warn = document.getElementById('bounds-warning');
+  if (warn) warn.style.display = boundsRectState.areas.length === 0 ? 'inline' : 'none';
 }
 
 function currentBoundsToSend() {
-  if (boundsRectState.frozen && boundsRectState.bounds) {
-    // Freezing pins the actual subscription too, not just the outline —
-    // otherwise the drawn rect (e.g. restored from the settings cookie)
-    // would silently disagree with what's really subscribed on the server.
-    return boundsRectState.bounds;
-  }
-  const b = map.getBounds();
-  return [[b.getSouth(), b.getWest()], [b.getNorth(), b.getEast()]];
+  return boundsRectState.areas.length > 0 ? boundsRectState.areas : null;
 }
 
 function sendBounds(ws) {
   if (ws?.readyState !== WebSocket.OPEN) return;
-  const bounds = currentBoundsToSend();
-  showSubscribedBounds(bounds);
-  ws.send(JSON.stringify({ type: 'setBounds', bounds }));
+  ws.send(JSON.stringify({ type: 'setBounds', bounds: currentBoundsToSend() }));
 }
 
-function initBoundsRectControls() {
-  const checkbox = document.getElementById('freeze-bounds-checkbox');
-  if (checkbox) {
-    // Reflect the (possibly cookie-restored) saved state onto the checkbox,
-    // rather than reading the checkbox's static HTML default into state.
-    checkbox.checked = boundsRectState.frozen;
-    checkbox.addEventListener('change', (e) => { boundsRectState.frozen = e.target.checked; saveSettings(); });
+function areaAdded() {
+  redrawAreaRects();
+  sendBounds(activeWs);
+  saveSettings();
+}
+
+// ── "+ Add area": drag a rectangle on the map ──────────────────────────────
+let drawStart = null;
+let drawPreviewRect = null;
+
+function onDrawMouseDown(e) {
+  drawStart = e.latlng;
+  drawPreviewRect = L.rectangle([e.latlng, e.latlng], {
+    color: '#fbbf24', weight: 1.5, dashArray: '4,3', fill: true, fillOpacity: 0.08, interactive: false,
+  }).addTo(map);
+  map.on('mousemove', onDrawMouseMove);
+  map.on('mouseup', onDrawMouseUp);
+}
+
+function onDrawMouseMove(e) {
+  if (drawPreviewRect) drawPreviewRect.setBounds([drawStart, e.latlng]);
+}
+
+function onDrawMouseUp(e) {
+  const start = drawStart, end = e.latlng;
+  cancelAddArea(); // tears down preview/listeners, but leaves start/end available below
+  if (!start) return;
+  const box = [
+    [Math.min(start.lat, end.lat), Math.min(start.lng, end.lng)],
+    [Math.max(start.lat, end.lat), Math.max(start.lng, end.lng)],
+  ];
+  // Ignore a plain click with no drag rather than adding a zero-size area.
+  if (box[1][0] - box[0][0] > 1e-6 && box[1][1] - box[0][1] > 1e-6) {
+    boundsRectState.areas.push(box);
+    areaAdded();
   }
-  // Show whatever bounding box was last known (e.g. restored from the
-  // settings cookie) right away — don't wait for the websocket to connect
-  // and send a live one, which freezing would then block forever anyway.
-  if (boundsRectState.bounds) drawBoundsRect(boundsRectState.bounds);
+}
+
+function setArmed(buttonId, armed) {
+  const btn = document.getElementById(buttonId);
+  if (btn) btn.classList.toggle('armed', armed);
+}
+
+function armAddArea() {
+  cancelRemoveArea();
+  setArmed('add-area-button', true);
+  map.dragging.disable();
+  map.getContainer().style.cursor = 'crosshair';
+  map.on('mousedown', onDrawMouseDown);
+}
+
+function cancelAddArea() {
+  map.off('mousedown', onDrawMouseDown);
+  map.off('mousemove', onDrawMouseMove);
+  map.off('mouseup', onDrawMouseUp);
+  if (drawPreviewRect) { map.removeLayer(drawPreviewRect); drawPreviewRect = null; }
+  map.dragging.enable();
+  map.getContainer().style.cursor = '';
+  drawStart = null;
+  setArmed('add-area-button', false);
+}
+
+// ── "- Remove area": click inside an existing area to delete it ───────────
+function areaIndexAt(latlng) {
+  const { lat, lng } = latlng;
+  const lon = normalizeLon(lng);
+  return boundsRectState.areas.findIndex(([[s, w], [n, ee]]) => {
+    if (lat < s || lat > n) return false;
+    const west = normalizeLon(w), east = normalizeLon(ee);
+    return west <= east ? (lon >= west && lon <= east) : (lon >= west || lon <= east);
+  });
+}
+
+let removeHoverRect = null; // highlights whichever area the cursor is currently over, while remove mode is armed
+
+function clearRemoveHover() {
+  if (removeHoverRect) { map.removeLayer(removeHoverRect); removeHoverRect = null; }
+}
+
+function onRemoveHoverMove(e) {
+  const idx = areaIndexAt(e.latlng);
+  if (idx === -1) { clearRemoveHover(); return; }
+  const [[s, w], [n, ee]] = boundsRectState.areas[idx];
+  if (!removeHoverRect) {
+    removeHoverRect = L.rectangle([[s, w], [n, ee]], {
+      color: '#ef4444', weight: 2, opacity: 0.9, fill: true, fillColor: '#ef4444', fillOpacity: 0.15, interactive: false,
+    }).addTo(map);
+  } else {
+    removeHoverRect.setBounds([[s, w], [n, ee]]);
+  }
+}
+
+function onRemoveClick(e) {
+  const idx = areaIndexAt(e.latlng);
+  clearRemoveHover();
+  if (idx === -1) return;
+  boundsRectState.areas.splice(idx, 1);
+  areaAdded();
+}
+
+function armRemoveArea() {
+  cancelAddArea();
+  setArmed('remove-area-button', true);
+  map.getContainer().style.cursor = 'crosshair';
+  map.on('mousemove', onRemoveHoverMove);
+  map.on('click', onRemoveClick);
+}
+
+function cancelRemoveArea() {
+  map.off('mousemove', onRemoveHoverMove);
+  map.off('click', onRemoveClick);
+  clearRemoveHover();
+  map.getContainer().style.cursor = '';
+  setArmed('remove-area-button', false);
+}
+
+function initBoundsAreaControls() {
+  const addBtn = document.getElementById('add-area-button');
+  if (addBtn) addBtn.addEventListener('click', () => {
+    addBtn.classList.contains('armed') ? cancelAddArea() : armAddArea();
+  });
+  const removeBtn = document.getElementById('remove-area-button');
+  if (removeBtn) removeBtn.addEventListener('click', () => {
+    removeBtn.classList.contains('armed') ? cancelRemoveArea() : armRemoveArea();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { cancelAddArea(); cancelRemoveArea(); }
+  });
+  // Draw whatever areas were restored from the settings cookie right away —
+  // don't wait for the websocket to connect.
+  redrawAreaRects();
 }
 
 // Wraps to (-180, 180] — same reasoning as server.mjs's own copy: Leaflet's
@@ -119,11 +289,7 @@ function onMapMove() {
   clearTimeout(boundsTimer);
   boundsTimer = setTimeout(() => {
     rewrapAllMarkers();
-    updateBoundsVisibility(); // live on-screen filtering — independent of the frozen subscription
-    // While frozen, the subscription is deliberately pinned — panning/
-    // zooming around to inspect it shouldn't re-send (or re-affirm) a
-    // bounds update at all.
-    if (!boundsRectState.frozen) sendBounds(activeWs);
+    updateBoundsVisibility(); // live on-screen filtering — independent of the drawn subscription areas
   }, 500);
 }
 
@@ -177,7 +343,7 @@ function connect() {
 }
 
 export function initWebSocket() {
-  initBoundsRectControls();
+  initBoundsAreaControls();
   map.on('moveend', onMapMove);
   map.on('zoomend', onMapMove);
   map.on('zoomstart', onZoomStart);

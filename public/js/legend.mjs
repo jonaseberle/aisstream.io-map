@@ -34,6 +34,7 @@ function buildLegendContent() {
         <span id="status-dot" style="display: inline-block"></span>
         <span id="status-text">Connecting…</span>
         <span id="msg-rate-wrap">(<strong id="msg-rate">0</strong> msg/s)</span>
+        <span id="bounds-warning" title="No bounds areas defined — receiving ship data for the whole world">⚠ no areas</span>
       </span>`;
     div.appendChild(hdr);
 
@@ -174,15 +175,16 @@ function buildLegendContent() {
     smSep.className = 'legend-sep';
     content.appendChild(smSep);
 
-    const boundsBody = mkGroup('Bounds', 'boundsCollapsed');
+    const boundsBody = mkGroup('Areas (bounds)', 'boundsCollapsed');
 
-    const fbRow = document.createElement('div');
-    fbRow.className = 'legend-row';
-    fbRow.innerHTML = `<label id="freeze-bounds-label" title="Stop updating the dashed bounding-box outline on the map."><input type="checkbox" id="freeze-bounds-checkbox"> Freeze bounds rect</label>`;
-    boundsBody.appendChild(fbRow);
-    // initBoundsRectControls() (called from main.mjs via initWebSocket(),
-    // after legend.mjs builds this panel) attaches the real listener — same
-    // id as before, just relocated from the header into this group.
+    const areaButtonsRow = document.createElement('div');
+    areaButtonsRow.className = 'legend-button-row';
+    areaButtonsRow.innerHTML = `
+      <button type="button" id="add-area-button" class="legend-button" title="Draw a rectangle on the map to subscribe to that area"><span class="legend-button-icon">➕</span> Add area</button>
+      <button type="button" id="remove-area-button" class="legend-button" title="Click an existing area on the map to remove it"><span class="legend-button-icon">➖</span> Remove area</button>`;
+    boundsBody.appendChild(areaButtonsRow);
+    // initBoundsAreaControls() (called from main.mjs via initWebSocket(),
+    // after legend.mjs builds this panel) attaches the real listeners.
 
     const boundsSep = document.createElement('div');
     boundsSep.className = 'legend-sep';

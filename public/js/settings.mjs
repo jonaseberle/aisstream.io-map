@@ -2,9 +2,9 @@ import { filterState, hiddenCategories, hiddenTypes } from './visibility.mjs';
 import { smoothMotionState } from './smoothMotion.mjs';
 import { boundsRectState } from './websocket.mjs';
 
-// Persists UI settings (filters, smooth motion, the bounds-rect freeze
-// toggle) across reloads via a cookie — separate from the ship/vessel DATA
-// persistence in storage.mjs, which uses localStorage and is unaffected by this.
+// Persists UI settings (filters, smooth motion, drawn bounds areas) across
+// reloads via a cookie — separate from the ship/vessel DATA persistence in
+// storage.mjs, which uses localStorage and is unaffected by this.
 const COOKIE_NAME = 'ais_ui_settings';
 const COOKIE_MAX_AGE_DAYS = 365;
 
@@ -36,9 +36,8 @@ export function loadSettings() {
       for (const t of s.hiddenTypes) hiddenTypes.add(t);
     }
     if (s.smoothMotion && typeof s.smoothMotion === 'object') Object.assign(smoothMotionState, s.smoothMotion);
-    if (s.boundsRect && typeof s.boundsRect === 'object') {
-      if (typeof s.boundsRect.frozen === 'boolean') boundsRectState.frozen = s.boundsRect.frozen;
-      if (Array.isArray(s.boundsRect.bounds)) boundsRectState.bounds = s.boundsRect.bounds;
+    if (s.boundsRect && typeof s.boundsRect === 'object' && Array.isArray(s.boundsRect.areas)) {
+      boundsRectState.areas = s.boundsRect.areas;
     }
   } catch (e) {
     console.warn('UI settings cookie load failed:', e.message);
@@ -51,7 +50,7 @@ export function saveSettings() {
     hiddenCategories: [...hiddenCategories],
     hiddenTypes: [...hiddenTypes],
     smoothMotion: { enabled: smoothMotionState.enabled, deltaSec: smoothMotionState.deltaSec },
-    boundsRect: { frozen: boundsRectState.frozen, bounds: boundsRectState.bounds },
+    boundsRect: { areas: boundsRectState.areas },
   };
   try {
     writeCookie(COOKIE_NAME, JSON.stringify(payload));
