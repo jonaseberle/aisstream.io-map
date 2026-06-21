@@ -63,9 +63,9 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // or stored here.
 const shipMeta = new Map();
 
-const clients = new Set();
-let currentBounds = null; // [[s,w],[n,e]]
+const clients = new Map(); // ws -> { boxes: [[s,w],[n,e], ...] } — each client's own subscribed area(s)
 let aisSocket = null;
+let lastSubscribeAt = null; // set right after sending a subscribe request upstream, cleared on the next message — lets us log how long aisstream.io took to start honoring it
 
 // aisstream.io's MetaData.time_utc looks like
 // "2026-06-20 22:32:03.085239788 +0000 UTC" (Go's default time.Time
@@ -90,12 +90,34 @@ function normalizeLon(lon) {
   return ((lon + 540) % 360) - 180;
 }
 
-function inBounds(lat, lon) {
-  if (!currentBounds) return true;
-  const [[s, w], [n, e]] = currentBounds;
+function inBoundsBox(lat, lon, box) {
+  const [[s, w], [n, e]] = box;
   if (lat < s || lat > n) return false;
   const west = normalizeLon(w), east = normalizeLon(e), x = normalizeLon(lon);
   return west <= east ? (x >= west && x <= east) : (x >= west || x <= east);
+}
+
+// No boxes means "no bounds set yet" — same as the old `!currentBounds`
+// behavior of receiving everything.
+function inAnyBounds(lat, lon, boxes) {
+  if (!boxes || boxes.length === 0) return true;
+  return boxes.some((box) => inBoundsBox(lat, lon, box));
+}
+
+// A client's 'setBounds'/connection-URL bounds can be either a single box
+// [[s,w],[n,e]] or an array of boxes [[[s,w],[n,e]], ...] — the latter lets
+// one client subscribe to multiple disjoint areas at once. Distinguish them
+// by checking whether the first element is itself a box (an array) or a
+// [lat,lon] pair (numbers).
+function normalizeBoundsList(bounds) {
+  if (!Array.isArray(bounds) || bounds.length === 0) return [];
+  return Array.isArray(bounds[0][0]) ? bounds : [bounds];
+}
+
+function mergedClientBounds() {
+  const all = [];
+  for (const { boxes } of clients.values()) all.push(...boxes);
+  return all;
 }
 
 const MESSAGE_TYPES = ['PositionReport', 'StandardClassBPositionReport', 'LongRangeAisBroadcastMessage', 'ShipStaticData'];
@@ -111,8 +133,15 @@ function splitAntimeridian(bounds) {
   return [[[s, west], [n, 180]], [[s, -180], [n, east]]];
 }
 
-function subscribe(bounds) {
-  const boxes = bounds ? splitAntimeridian(bounds) : [[[-90, -180], [90, 180]]];
+// Takes the merged list of every client's boxes (one upstream connection is
+// shared across all clients, so its subscription has to cover the union of
+// what they each want) and sends it to aisstream.io.
+function subscribe(boxesList) {
+  const boxes = boxesList && boxesList.length > 0
+    ? boxesList.flatMap(splitAntimeridian)
+    : [[[-90, -180], [90, 180]]];
+  lastSubscribeAt = Date.now();
+  log(`Subscribing upstream with ${boxes.length} box(es): ${JSON.stringify(boxes)}`);
   aisSocket.send(JSON.stringify({
     APIKey: API_KEY,
     BoundingBoxes: boxes,
@@ -140,7 +169,7 @@ function connectToAIS() {
 
   aisSocket.on('open', () => {
     log('Connected to aisstream.io');
-    subscribe(currentBounds);
+    subscribe(mergedClientBounds());
     lastAliveAt = Date.now();
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
@@ -150,17 +179,36 @@ function connectToAIS() {
         aisSocket.terminate(); // skips the close handshake (which a dead socket won't complete anyway); triggers 'close' below
         return;
       }
+      log(`Pinging aisstream.io (idle for ${Math.round((Date.now() - lastAliveAt) / 1000)}s)`);
       aisSocket.ping();
     }, PING_INTERVAL_MS);
   });
 
-  aisSocket.on('pong', () => { lastAliveAt = Date.now(); });
+  aisSocket.on('pong', () => {
+    log(`Pong received from aisstream.io (${Date.now() - lastAliveAt}ms since last activity)`);
+    lastAliveAt = Date.now();
+  });
 
   aisSocket.on('message', (data) => {
     lastAliveAt = Date.now(); // real traffic is at least as good proof of life as a pong
     const str = data.toString();
+    let outStr = str;
+    let isPosition = false;
+    let lat, lon;
+
     try {
       const msg = JSON.parse(str);
+
+      // aisstream.io has no explicit "bounds accepted" ack — the only signal
+      // that a subscribe request took effect is that data starts flowing
+      // again, so log how long that took the first time a message arrives
+      // after each subscribe call.
+      if (lastSubscribeAt != null) {
+        log(`Upstream bounds confirmed implicitly: first message arrived ${Date.now() - lastSubscribeAt}ms after subscribe request (aisstream.io sends no explicit ack)`);
+        lastSubscribeAt = null;
+      }
+      if (msg.error) log(`Upstream subscription error: ${msg.error}`);
+
       const payload = msg.Message && Object.values(msg.Message)[0];
       const mmsi = String(payload?.UserID ?? msg.MetaData?.MMSI ?? '?');
 
@@ -178,32 +226,23 @@ function connectToAIS() {
         const dimStr = length ? ` dim=${length}x${width}m draught=${draught}m` : '';
         log(`[ShipStaticData] ${name || 'Unknown'} (${mmsi}) type=${typeCode}${dimStr}`);
       } else {
+        isPosition = true;
+        lat = payload?.Latitude;
+        lon = payload?.Longitude;
         const name = msg.MetaData?.ShipName?.trim() || 'Unknown';
-        const lat  = payload?.Latitude;
-        const lon  = payload?.Longitude;
         const sog  = payload?.Sog;
         const cog  = payload?.Cog;
         const hdg  = payload?.TrueHeading;
         const meta = shipMeta.get(mmsi);
         const typeStr = meta ? ` type=${meta.typeCode}` : '';
+        const merged = mergedClientBounds();
         const boundsStr = (lat != null && lon != null)
-          ? (inBounds(lat, lon) ? ' [IN]' : ` [OUT bounds=${JSON.stringify(currentBounds)}]`)
+          ? (inAnyBounds(lat, lon, merged) ? ' [IN]' : ` [OUT bounds=${JSON.stringify(merged)}]`)
           : ' [no coords]';
         log(`[${msg.MessageType}] ${name} (${mmsi}) lat=${lat?.toFixed(4)} lon=${lon?.toFixed(4)} sog=${sog} cog=${cog} hdg=${hdg}${typeStr}${boundsStr}`);
-      }
-    } catch (_) {}
 
-    // Enrich position messages with cached static data, magnetic declination,
-    // and the upstream-reported timestamp (_ts)
-    let outStr = str;
-    try {
-      const msg = JSON.parse(str);
-      if (msg.MessageType !== 'ShipStaticData') {
-        const payload = msg.Message && Object.values(msg.Message)[0];
-        const mmsi = String(payload?.UserID ?? msg.MetaData?.MMSI ?? '?');
-        const lat = payload?.Latitude;
-        const lon = payload?.Longitude;
-        const meta = shipMeta.get(mmsi);
+        // Enrich position messages with cached static data, magnetic
+        // declination, and the upstream-reported timestamp (_ts)
         const extra = {};
         if (meta) extra._meta = meta;
         // The actual moment aisstream.io received/relayed this report —
@@ -222,8 +261,14 @@ function connectToAIS() {
       }
     } catch (_) {}
 
-    for (const client of clients) {
-      if (client.readyState === WebSocket.OPEN) client.send(outStr);
+    // The upstream subscription is the union of every client's boxes, so
+    // without per-client filtering here a client would also receive
+    // position traffic meant for other clients' areas. ShipStaticData isn't
+    // tied to a position, so it's still broadcast to everyone.
+    for (const [ws, info] of clients) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (isPosition && lat != null && lon != null && !inAnyBounds(lat, lon, info.boxes)) continue;
+      ws.send(outStr);
     }
   });
 
@@ -239,7 +284,7 @@ function connectToAIS() {
 }
 
 wss.on('connection', (ws, req) => {
-  clients.add(ws);
+  clients.set(ws, { boxes: [] });
   log(`Browser connected (${clients.size} total), sending ${shipMeta.size} cached ship records`);
   if (shipMeta.size > 0) {
     ws.send(JSON.stringify({ _type: 'metaCache', data: Object.fromEntries(shipMeta) }));
@@ -251,32 +296,34 @@ wss.on('connection', (ws, req) => {
   // waiting on that first message round-trip. Matters most right after a
   // server restart: aisSocket reconnects to aisstream.io and re-subscribes
   // within milliseconds, well before any browser's 3s reconnect delay — if
-  // that re-subscribe happened with currentBounds still unset (world-wide)
-  // and stayed that way until the round-trip completed, the upstream feed
-  // would sit on the wrong (much larger) subscription in the meantime.
+  // that re-subscribe happened with this client's bounds still unset
+  // (world-wide) and stayed that way until the round-trip completed, the
+  // upstream feed would sit on the wrong (much larger) subscription in the
+  // meantime.
   try {
     const bounds = JSON.parse(new URL(req.url, 'http://x').searchParams.get('bounds'));
-    if (Array.isArray(bounds)) {
-      currentBounds = bounds;
-      const [[s, w], [n, e]] = bounds;
-      log(`Bounds received with connection: SW(${s.toFixed(3)}, ${w.toFixed(3)}) NE(${n.toFixed(3)}, ${e.toFixed(3)})`);
-      if (aisSocket?.readyState === WebSocket.OPEN) subscribe(bounds);
+    const boxes = normalizeBoundsList(bounds);
+    if (boxes.length > 0) {
+      clients.get(ws).boxes = boxes;
+      log(`Bounds received with connection: ${boxes.length} box(es) ${JSON.stringify(boxes)}`);
+      if (aisSocket?.readyState === WebSocket.OPEN) subscribe(mergedClientBounds());
     }
   } catch (_) {}
 
   ws.on('close', () => {
     clients.delete(ws);
     log(`Browser disconnected (${clients.size} remaining)`);
+    if (aisSocket?.readyState === WebSocket.OPEN) subscribe(mergedClientBounds());
   });
 
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
       if (msg.type === 'setBounds' && aisSocket?.readyState === WebSocket.OPEN) {
-        currentBounds = msg.bounds;
-        const [[s, w], [n, e]] = msg.bounds;
-        log(`Bounds updated: SW(${s.toFixed(3)}, ${w.toFixed(3)}) NE(${n.toFixed(3)}, ${e.toFixed(3)})`);
-        subscribe(msg.bounds);
+        const boxes = normalizeBoundsList(msg.bounds);
+        clients.get(ws).boxes = boxes;
+        log(`Bounds updated for client: ${boxes.length} box(es) ${JSON.stringify(boxes)}`);
+        subscribe(mergedClientBounds());
       }
     } catch (_) {}
   });
