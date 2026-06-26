@@ -27,7 +27,7 @@ export const STORAGE_KEY_COMPRESSED = 'ais_compressed';
 // unpack functions, which would silently misread fields by position
 // instead of failing loudly.
 export const STORAGE_KEY_VERSION = 'ais_version';
-export const STORAGE_FORMAT_VERSION = 2; // v2: dropped the redundant typeLabel field from packStatic
+export const STORAGE_FORMAT_VERSION = 3; // v3: dropped the unused declination field from packFix/packShip; renamed cog/hdg to courseTrue/headingTrue
 const STORAGE_TTL_MS = 2 * 60 * 60 * 1000; // prune data older than 2 h on load
 
 export const STORAGE_QUOTA_KB = 5 * 1024; // localStorage is typically limited to 5 MB
@@ -197,19 +197,19 @@ function* evictionSteps() {
 // read like field names despite the data itself having none) cuts all of
 // that out. The mmsi → record mapping itself stays a plain object/dict
 // (mmsi is a real lookup key, not a fixed-schema field to compact away).
-const FIX_LAT = 0, FIX_LON = 1, FIX_SOG = 2, FIX_COG = 3, FIX_HDG = 4,
-      FIX_NAV_STATUS = 5, FIX_DECLINATION = 6, FIX_TS = 7, FIX_HEADING_RELIABLE = 8, FIX_UNRELIABLE_REASON = 9;
+const FIX_LAT = 0, FIX_LON = 1, FIX_SOG = 2, FIX_COURSE_TRUE = 3, FIX_HEADING_TRUE = 4,
+      FIX_NAV_STATUS = 5, FIX_TS = 6, FIX_HEADING_RELIABLE = 7, FIX_UNRELIABLE_REASON = 8;
 
 function packFix(h) {
   return [
-    +h.lat.toFixed(4), +h.lon.toFixed(4), h.sog, h.cog, h.hdg, h.navStatus, h.declination,
+    +h.lat.toFixed(4), +h.lon.toFixed(4), h.sog, h.courseTrue, h.headingTrue, h.navStatus,
     h.ts, h.headingReliable, h.unreliableReason ?? null,
   ];
 }
 function unpackFix(a) {
   return {
-    lat: a[FIX_LAT], lon: a[FIX_LON], sog: a[FIX_SOG], cog: a[FIX_COG], hdg: a[FIX_HDG],
-    navStatus: a[FIX_NAV_STATUS], declination: a[FIX_DECLINATION], ts: a[FIX_TS],
+    lat: a[FIX_LAT], lon: a[FIX_LON], sog: a[FIX_SOG], courseTrue: a[FIX_COURSE_TRUE], headingTrue: a[FIX_HEADING_TRUE],
+    navStatus: a[FIX_NAV_STATUS], ts: a[FIX_TS],
     headingReliable: a[FIX_HEADING_RELIABLE], unreliableReason: a[FIX_UNRELIABLE_REASON],
   };
 }
@@ -218,18 +218,18 @@ function unpackFix(a) {
 // in ais_static (see packStatic/STATIC_NAME below); unpackShip's caller
 // (loadVesselData) passes that looked-up name back in rather than this
 // carrying its own redundant copy.
-const SHIP_LAT = 0, SHIP_LON = 1, SHIP_SOG = 2, SHIP_COG = 3, SHIP_HDG = 4,
-      SHIP_NAV_STATUS = 5, SHIP_DECLINATION = 6, SHIP_TS = 7,
-      SHIP_SPOOF_SUSPECTED = 8, SHIP_MAX_IMPLIED_KNOTS = 9, SHIP_HISTORY = 10;
+const SHIP_LAT = 0, SHIP_LON = 1, SHIP_SOG = 2, SHIP_COURSE_TRUE = 3, SHIP_HEADING_TRUE = 4,
+      SHIP_NAV_STATUS = 5, SHIP_TS = 6,
+      SHIP_SPOOF_SUSPECTED = 7, SHIP_MAX_IMPLIED_KNOTS = 8, SHIP_HISTORY = 9;
 
 // d (ship.data) is the live snapshot — lat/lon here are already the hull's
-// middle, and the real per-point cog/sog/hdg/navStatus/declination are
+// middle, and the real per-point courseTrue/sog/headingTrue/navStatus are
 // saved verbatim (in history, below) so a reload doesn't need to fabricate
 // them (see unpackShip/loadVesselData).
 function packShip(ship, maxPoints) {
   const d = ship.data;
   return [
-    +d.lat.toFixed(4), +d.lon.toFixed(4), d.sog, d.cog, d.hdg, d.navStatus, d.declination, d.ts,
+    +d.lat.toFixed(4), +d.lon.toFixed(4), d.sog, d.courseTrue, d.headingTrue, d.navStatus, d.ts,
     ship.spoofSuspected || false, ship.maxImpliedKnots || 0,
     ship.history.slice(-maxPoints).map(packFix),
   ];
@@ -237,8 +237,8 @@ function packShip(ship, maxPoints) {
 function unpackShip(mmsi, a, name) {
   return {
     data: {
-      mmsi, name: name ?? null, lat: a[SHIP_LAT], lon: a[SHIP_LON], sog: a[SHIP_SOG], cog: a[SHIP_COG],
-      hdg: a[SHIP_HDG], navStatus: a[SHIP_NAV_STATUS], declination: a[SHIP_DECLINATION], ts: a[SHIP_TS],
+      mmsi, name: name ?? null, lat: a[SHIP_LAT], lon: a[SHIP_LON], sog: a[SHIP_SOG], courseTrue: a[SHIP_COURSE_TRUE],
+      headingTrue: a[SHIP_HEADING_TRUE], navStatus: a[SHIP_NAV_STATUS], ts: a[SHIP_TS],
     },
     spoofSuspected: a[SHIP_SPOOF_SUSPECTED],
     maxImpliedKnots: a[SHIP_MAX_IMPLIED_KNOTS],
@@ -511,7 +511,7 @@ export function loadVesselData() {
       // already sitting in ais_static under the same mmsi key.
       const sd    = staticData.get(mmsi);
       const saved = unpackShip(mmsi, packed, sd?.name);
-      // The real per-point cog/sog/hdg/navStatus/declination are persisted
+      // The real per-point courseTrue/sog/headingTrue/navStatus are persisted
       // verbatim (see saveVesselData) — no fabricating them from position
       // deltas. Older saves (before this) won't have `history` at all;
       // those vessels just don't restore, rather than restoring with made-up
@@ -532,8 +532,8 @@ export function loadVesselData() {
       const maxImpliedKnots = spoofSuspected ? (saved.maxImpliedKnots ?? data.sog ?? 0) : 0;
       const trailColor = spoofSuspected ? '#ff4444' : CATEGORIES[shipCategory(sd?.typeCode)].color;
       const isFloating = isShipFloating(data.ts);
-      const { heading, usingLastKnown } = resolveHeading(data.cog, data.hdg, data.declination, null);
-      const dotAngle = !cogBad(data.cog) ? data.cog : heading;
+      const { heading, usingLastKnown } = resolveHeading(data.courseTrue, data.headingTrue, null);
+      const dotAngle = !cogBad(data.courseTrue) ? data.courseTrue : heading;
       const trail  = L.polyline(positions, { color: trailColor, weight: 1.5, opacity: 0.6 });
       // data.lat/data.lon already IS the hull's middle — it was stored that
       // way (see updateShip in messages.mjs) before ever being saved here.

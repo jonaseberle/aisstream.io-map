@@ -72,7 +72,7 @@ function appendNavHeadingReasons(reason, data) {
     const navReason = `Nav status unreliable: reports "${navLabel}" but sog ${data.sog.toFixed(1)} kn ≥ 0.5kn`;
     reason = reason ? `${reason}; ${navReason}` : navReason;
   }
-  if (bestHeading(data.cog, data.hdg, data.declination) == null) {
+  if (bestHeading(data.courseTrue, data.headingTrue) == null) {
     const hdgReason = 'Heading unreliable: no usable HDG or COG reported';
     reason = reason ? `${reason}; ${hdgReason}` : hdgReason;
   }
@@ -150,10 +150,10 @@ export function refreshIcon(mmsi) {
   const d = ship.data;
   const sd = staticData.get(mmsi);
   ship.isFloating = isFloatingNow(ship.history, d.ts);
-  const { heading, usingLastKnown } = resolveHeading(d.cog, d.hdg, d.declination, ship.lastGoodHeading);
+  const { heading, usingLastKnown } = resolveHeading(d.courseTrue, d.headingTrue, ship.lastGoodHeading);
   ship.usingLastKnownHeading = usingLastKnown;
   if (!usingLastKnown && heading != null) ship.lastGoodHeading = heading;
-  const dotAngle = !cogBad(d.cog) ? d.cog : heading;
+  const dotAngle = !cogBad(d.courseTrue) ? d.courseTrue : heading;
   // With smooth motion on, orienting the icon by the *live* heading here
   // would momentarily point it the wrong way relative to the marker's
   // lagged position/track — leave orientation to the smooth-motion loop,
@@ -293,14 +293,14 @@ export function updateShip(msg) {
   const dim = staticData.get(mmsi)?.dim;
   // msg._ts is the upstream-reported time (server.mjs parses MetaData.time_utc)
   // — falls back to local receipt time only if that's missing/unparseable.
-  const data = { mmsi, name: meta?.ShipName?.trim() || null, lat, lon, cog: pos.Cog, sog: pos.Sog, hdg: pos.TrueHeading, navStatus: pos.NavigationalStatus, declination: msg._declination ?? null, ts: msg._ts ?? Date.now() };
+  const data = { mmsi, name: meta?.ShipName?.trim() || null, lat, lon, courseTrue: pos.Cog, sog: pos.Sog, headingTrue: pos.TrueHeading, navStatus: pos.NavigationalStatus, ts: msg._ts ?? Date.now() };
   const typeCode = staticData.get(mmsi)?.typeCode;
   const cat = shipCategory(typeCode);
   const color = CATEGORIES[cat].color;
 
   if (ships.has(mmsi)) {
     const ship = ships.get(mmsi);
-    const { heading, usingLastKnown } = resolveHeading(data.cog, data.hdg, data.declination, ship.lastGoodHeading);
+    const { heading, usingLastKnown } = resolveHeading(data.courseTrue, data.headingTrue, ship.lastGoodHeading);
     ship.usingLastKnownHeading = usingLastKnown;
     if (!usingLastKnown && heading != null) ship.lastGoodHeading = heading;
     // The hull's middle (not the raw antenna fix) is computed once here and
@@ -348,11 +348,12 @@ export function updateShip(msg) {
     ship.positions.push(middle);
     ship.timestamps.push(data.ts);
     if (ship.positions.length > MAX_TRAIL_POINTS) { ship.positions.shift(); ship.timestamps.shift(); }
-    // headingReliable reflects THIS report's own cog/hdg (not any fallback
-    // to a previously-seen heading) — smooth motion's "Hide unreliable
-    // heading/course" filter needs to know whether the report itself had
-    // usable data, not just whether we have *some* heading to animate with.
-    ship.history.push({ lat: middle[0], lon: middle[1], sog: data.sog, cog: data.cog, hdg: data.hdg, navStatus: data.navStatus, declination: data.declination, ts: data.ts, headingReliable: bestHeading(data.cog, data.hdg, data.declination) != null, unreliableReason });
+    // headingReliable reflects THIS report's own courseTrue/headingTrue (not
+    // any fallback to a previously-seen heading) — smooth motion's "Hide
+    // unreliable heading/course" filter needs to know whether the report
+    // itself had usable data, not just whether we have *some* heading to
+    // animate with.
+    ship.history.push({ lat: middle[0], lon: middle[1], sog: data.sog, courseTrue: data.courseTrue, headingTrue: data.headingTrue, navStatus: data.navStatus, ts: data.ts, headingReliable: bestHeading(data.courseTrue, data.headingTrue) != null, unreliableReason });
     if (ship.history.length > MAX_TRAIL_POINTS) ship.history.shift();
     // Computed after the push above, so smooth motion sees this report as
     // the newest "future" point when deciding whether we've run out of data.
@@ -374,8 +375,8 @@ export function updateShip(msg) {
     // whichever report in this batch is newest wins by the time that runs.
     dirtyShips.add(mmsi);
   } else {
-    const { heading, usingLastKnown } = resolveHeading(data.cog, data.hdg, data.declination, null);
-    const dotAngle = !cogBad(data.cog) ? data.cog : heading;
+    const { heading, usingLastKnown } = resolveHeading(data.courseTrue, data.headingTrue, null);
+    const dotAngle = !cogBad(data.courseTrue) ? data.courseTrue : heading;
     // See the existing-ship branch above: the middle is computed once and
     // remembered as the ship's position from here on.
     const middle = shipMiddlePosition(lat, lon, heading, dim);
@@ -387,7 +388,7 @@ export function updateShip(msg) {
       ? `Speed unreliable: reported SOG ${data.sog.toFixed(1)} kn exceeds ${SPOOF_SPEED_KNOTS} kn`
       : null;
     const unreliableReason = appendNavHeadingReasons(spoofReason, data);
-    const history = [{ lat: middle[0], lon: middle[1], sog: data.sog, cog: data.cog, hdg: data.hdg, navStatus: data.navStatus, declination: data.declination, ts: data.ts, headingReliable: bestHeading(data.cog, data.hdg, data.declination) != null, unreliableReason }];
+    const history = [{ lat: middle[0], lon: middle[1], sog: data.sog, courseTrue: data.courseTrue, headingTrue: data.headingTrue, navStatus: data.navStatus, ts: data.ts, headingReliable: bestHeading(data.courseTrue, data.headingTrue) != null, unreliableReason }];
     const isFloating = isFloatingNow(history, data.ts);
     const trail = L.polyline(positions, { color, weight: 1.5, opacity: 0.6 });
     // The marker sits at the hull's middle, not the raw antenna fix — both

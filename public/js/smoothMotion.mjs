@@ -10,7 +10,7 @@ import { haversineNM, fmtNM } from './geo.mjs';
 // "Smooth motion" trades immediacy for smoothness: instead of snapping each
 // marker to its latest reported position the instant a message arrives, it
 // displays — and filters — the vessel state DELTA seconds in the past. At
-// each real report it shows exactly that report's position and cog/heading;
+// each real report it shows exactly that report's position and course/heading;
 // between reports it dead-reckons along a circular arc sized by the ship's
 // realistic turning ability, corrected to land exactly on the next report.
 export const MIN_DELTA_SECONDS = 60;
@@ -33,7 +33,7 @@ export function targetTimestamp() {
 
 // Index pair in history (sorted ascending by ts) surrounding targetTs.
 // Returns the same index twice when targetTs is outside the stored range.
-function findBracket(history, targetTs) {
+export function findBracket(history, targetTs) {
   const last = history.length - 1;
   if (targetTs <= history[0].ts) return [0, 0];
   if (targetTs >= history[last].ts) return [last, last];
@@ -79,15 +79,15 @@ function resolveAt(history, index, pick) {
   }
   return null;
 }
-// The bow's orientation (hdg preferred, cog fallback) at history[index].
+// The bow's orientation (headingTrue preferred, courseTrue fallback) at history[index].
 function resolveHeadingAt(history, index) {
-  return resolveAt(history, index, (pt) => bestHeading(pt.cog, pt.hdg, pt.declination));
+  return resolveAt(history, index, (pt) => bestHeading(pt.courseTrue, pt.headingTrue));
 }
-// The actual direction of travel (cog preferred, hdg fallback) at
+// The actual direction of travel (courseTrue preferred, headingTrue fallback) at
 // history[index] — what the PATH follows, as distinct from the bow's
 // orientation (resolveHeadingAt), which can differ under leeway/current.
 function resolveCourseAt(history, index) {
-  return resolveAt(history, index, (pt) => bestCourse(pt.cog, pt.hdg, pt.declination));
+  return resolveAt(history, index, (pt) => bestCourse(pt.courseTrue, pt.headingTrue));
 }
 
 const M_PER_DEG_LAT = 111320;
@@ -112,10 +112,10 @@ function destFromDisplacement(lat, lon, dN, dE) {
 // that same single report), the direction of travel — not just the
 // position — is continuous across every fix.
 //
-// The curve's own tangent direction is the COURSE (cog preferred, hdg
-// fallback — resolveCourseAt), since that's what the GPS track actually
-// follows. The bow's drawn orientation (heading: hdg preferred, cog
-// fallback — resolveHeadingAt) can differ from course under leeway/current,
+// The curve's own tangent direction is the COURSE (courseTrue preferred,
+// headingTrue fallback — resolveCourseAt), since that's what the GPS track
+// actually follows. The bow's drawn orientation (heading: headingTrue
+// preferred, courseTrue fallback — resolveHeadingAt) can differ from course under leeway/current,
 // so it isn't necessarily the curve's tangent — instead it's carried as a
 // "crab" OFFSET from course (h0-c0 at L, h1-c1 at R), itself interpolated
 // across the segment and added back onto the curve's live course in
@@ -136,7 +136,7 @@ function buildSegment(history, li, ri) {
   // headingReliable reports, and one resolves iff the other does — see
   // bestHeading/bestCourse). Keying off the resolved value rather than the
   // endpoints' OWN reliability is what lets "Hide unreliable heading/course"
-  // keep a vessel whose current bracket reports happened to omit cog/hdg but
+  // keep a vessel whose current bracket reports happened to omit courseTrue/headingTrue but
   // which clearly has a usable course nearby — the icon is drawn along that
   // course, so it mustn't be filtered as headingless.
   const headingKnown = h0Resolved != null || h1Resolved != null;
@@ -185,7 +185,13 @@ function buildSegment(history, li, ri) {
   const crab0 = angleDiff(c0, h0);
   const crab1 = angleDiff(c1, h1);
   const crabDelta = angleDiff(crab0, crab1);
-  return { L, T, P1N, P1E, V0N, V0E, V1N, V1E, h0, h1, c0, c1, crab0, crabDelta, headingKnown };
+  // Shortest signed course change L→R — used by kinematicPoint as a smooth
+  // fallback for `course` whenever the velocity tangent can't drive it (the
+  // ship is stopped at one or both ends), so heading (course + crab) eases
+  // continuously across the whole segment instead of holding c0 then
+  // snapping to c1 partway through.
+  const crsDelta = angleDiff(c0, c1);
+  return { L, T, P1N, P1E, V0N, V0E, V1N, V1E, h0, h1, c0, c1, crab0, crabDelta, crsDelta, headingKnown };
 }
 
 // Cubic Hermite basis (and its derivative) for parameter u in [0,1].
@@ -221,28 +227,52 @@ function kinematicPoint(L, R, frac, seg) {
   const posE = b.m0 * seg.T * seg.V0E + b.p1 * seg.P1E + b.m1 * seg.T * seg.V1E;
   const [lat, lon] = destFromDisplacement(seg.L.lat, seg.L.lon, posN, posE);
 
-  // When BOTH ends report ~0 speed, any P1N/P1E displacement between them is
-  // pure GPS position jitter (a moored ship's antenna fix wobbling by a few
-  // meters), not real travel — letting that drive `course` via the
+  // When BOTH ends report a non-moving sog, any P1N/P1E displacement between
+  // them is pure GPS position jitter (a moored ship's antenna fix wobbling
+  // by a few meters), not real travel — letting that drive `course` via the
   // derivative below would turn that noise into an arbitrarily swinging
   // heading mid-segment for a vessel that's actually just sitting still
   // (it's pinned correctly exactly at the fixes regardless, since the
   // tangent terms vanish there — only strictly between them does the noise
-  // leak in). Skip the derivative entirely in that case.
-  const stoppedBoth = Math.hypot(seg.V0N, seg.V0E) < 1e-6 && Math.hypot(seg.V1N, seg.V1E) < 1e-6;
+  // leak in). Skip the derivative entirely in that case. Keyed off
+  // isShipMoving(sog) — same threshold buildSegment's c0/c1 already use to
+  // decide this — rather than the tangent vectors' own magnitude: those are
+  // scaled by filterState.smoothMotionTension, so a low tension setting
+  // could make a genuinely-moving vessel's tangent look ~0 too, and even at
+  // full tension a slow-but-real sog (e.g. 0.1kn) sits well above a raw
+  // epsilon while still being too small for atan2 to recover a stable
+  // direction from — exactly the noisy-swing case this guards against.
+  const stoppedBoth = !isShipMoving(L.sog) && !isShipMoving(R.sog);
+  // Smooth fallback for `course` whenever direction-of-travel is undefined
+  // — a steady angular lerp from c0 to c1 across the whole segment via
+  // seg.crsDelta, rather than holding c0 then snapping straight to c1 (the
+  // previous behavior, which made heading — course + crab — visibly jump).
+  const stoppedCourse = (seg.c0 + seg.crsDelta * u + 360) % 360;
   let course;
   if (stoppedBoth) {
-    course = u < 0.5 ? seg.c0 : seg.c1;
+    course = stoppedCourse;
   } else {
     const d = hermiteBasisDeriv(u);
     const velN = (d.m0 * seg.T * seg.V0N + d.p1 * seg.P1N + d.m1 * seg.T * seg.V1N) / seg.T;
     const velE = (d.m0 * seg.T * seg.V0E + d.p1 * seg.P1E + d.m1 * seg.T * seg.V1E) / seg.T;
-    // Falls back to the nearest endpoint's course when the ship isn't moving
-    // (zero tangent — e.g. stopped at both ends), where direction-of-travel
-    // is undefined.
-    course = Math.hypot(velN, velE) > 1e-6
-      ? (Math.atan2(velE, velN) * 180 / Math.PI + 360) % 360
-      : (u < 0.5 ? seg.c0 : seg.c1);
+    // Only ONE end stopped (e.g. casting off, or coming alongside): right
+    // beside that end the tangent is technically nonzero but vanishingly
+    // small, so atan2 on it returns whatever direction P1N/P1E (the raw
+    // L→R displacement) and the OTHER end's tangent happen to combine into
+    // — unrelated to this end's own pinned course — producing a real,
+    // sudden jump right at/just past that fix (confirmed by simulation:
+    // IJVEER 50 around 2026-06-25T13:45:31Z snapped ~97° within under a
+    // second of casting off). Blending the derivative direction in by how
+    // much of the local tangent speed it's actually carrying — relative to
+    // this segment's own peak speed, not an absolute epsilon — makes that
+    // weight rise continuously from 0 (at the stopped end, where it must
+    // equal stoppedCourse exactly to match the neighboring segment) instead
+    // of switching the instant the tangent is merely nonzero.
+    const tangentSpeed = Math.hypot(velN, velE);
+    const speedScale = Math.max(Math.hypot(seg.V0N, seg.V0E), Math.hypot(seg.V1N, seg.V1E), 1e-6);
+    const weight = Math.min(1, tangentSpeed / (speedScale * 0.05));
+    const derivCourse = tangentSpeed > 1e-9 ? (Math.atan2(velE, velN) * 180 / Math.PI + 360) % 360 : stoppedCourse;
+    course = (stoppedCourse + angleDiff(stoppedCourse, derivCourse) * weight + 360) % 360;
   }
   const crab = seg.crab0 + seg.crabDelta * u;
   const heading = (course + crab + 360) % 360;
@@ -250,8 +280,8 @@ function kinematicPoint(L, R, frac, seg) {
 }
 
 // The ship's state as it was at targetTs. At a real report instant (frac=0
-// or 1) this is exactly that report's position and cog (falling back to
-// heading) — between reports it's eased along the kinematic arc above, with
+// or 1) this is exactly that report's position and courseTrue (falling back
+// to heading) — between reports it's eased along the kinematic arc above, with
 // speed linearly lerped. Position is held at the nearest known report (not
 // extrapolated) when targetTs falls outside the stored history, i.e.
 // "assume it hasn't moved" for sparsely-reporting/non-moving targets.
@@ -289,17 +319,17 @@ export function historicalState(ship, targetTs, lengthM) {
   // targetTs <= the latest report's ts in that case).
   const newest = history[history.length - 1];
   const overrunSec = Math.max(0, (targetTs - newest.ts) / 1000);
-  // hdg = the (interpolated) bow orientation; cog = the (interpolated)
-  // course/track — kept distinct (unlike a previous version, which merged
-  // them into one value) so the icon's body and its speed-dot trail can
-  // each follow the right one, exactly like live mode does. When neither
-  // bracket report had a reliable reading, keep both null so filters like
-  // "Hide unreliable heading/course" still treat it as unknown instead of
-  // seeing the 0° fallback used internally for the math.
+  // headingTrue = the (interpolated) bow orientation; courseTrue = the
+  // (interpolated) course/track — kept distinct (unlike a previous version,
+  // which merged them into one value) so the icon's body and its speed-dot
+  // trail can each follow the right one, exactly like live mode does. When
+  // neither bracket report had a reliable reading, keep both null so filters
+  // like "Hide unreliable heading/course" still treat it as unknown instead
+  // of seeing the 0° fallback used internally for the math.
   const headingOut = headingKnown ? heading : null;
   const courseOut = headingKnown ? course : null;
   return {
-    data: { lat, lon, sog, cog: courseOut, hdg: headingOut, navStatus: L.navStatus, declination: L.declination, ts: L.ts },
+    data: { lat, lon, sog, courseTrue: courseOut, headingTrue: headingOut, navStatus: L.navStatus, ts: L.ts },
     intervalSec,
     overrunSec,
   };
@@ -322,8 +352,8 @@ function snapToLatest(mmsi, ship) {
   // matches the now-current position — so restore the live orientation the
   // same way the live-mode message handler does.
   const sd = staticData.get(mmsi);
-  const { heading } = resolveHeading(d.cog, d.hdg, d.declination, ship.lastGoodHeading);
-  const dotAngle = !cogBad(d.cog) ? d.cog : heading;
+  const { heading } = resolveHeading(d.courseTrue, d.headingTrue, ship.lastGoodHeading);
+  const dotAngle = !cogBad(d.courseTrue) ? d.courseTrue : heading;
   // d.lat/d.lon already IS the hull's middle (computed once on ingestion —
   // see updateShip in messages.mjs), so no re-deriving it here.
   ship.middle = [d.lat, d.lon];
@@ -348,12 +378,13 @@ function snapToSmooth(mmsi, ship, targetTs) {
   const snap = historicalState(ship, targetTs, lengthM);
   if (!snap) return;
   const here = [snap.data.lat, snap.data.lon];
-  // hdg drives the bow's drawn orientation (fallback: cog, then last known);
-  // cog drives the speed-dot trail direction (fallback: whatever heading
-  // resolved to) — same split live mode uses, just sourced from the
-  // analytic interpolation instead of the latest raw report.
-  const headingAngle = snap.data.hdg ?? snap.data.cog ?? ship.lastGoodHeading ?? 0;
-  const dotAngle = snap.data.cog ?? headingAngle;
+  // headingTrue drives the bow's drawn orientation (fallback: courseTrue,
+  // then last known); courseTrue drives the speed-dot trail direction
+  // (fallback: whatever heading resolved to) — same split live mode uses,
+  // just sourced from the analytic interpolation instead of the latest raw
+  // report.
+  const headingAngle = snap.data.headingTrue ?? snap.data.courseTrue ?? ship.lastGoodHeading ?? 0;
+  const dotAngle = snap.data.courseTrue ?? headingAngle;
   ship.middle = here;
   ship.marker.setLatLng(wrapLatLngNearCenter(ship.middle));
   ship.marker.setIcon(shipIcon(headingAngle, dotAngle, snap.data.sog, sd?.typeCode, dim, ship.isFloating));
@@ -478,8 +509,8 @@ export function pastTrackPoints(ship, targetTs, lengthM, trailSec) {
     if (h.ts >= fromTs && h.ts <= targetTs) {
       waypoints.push({
         ts: h.ts, lat: h.lat, lon: h.lon, sog: h.sog,
-        heading: h.headingReliable ? bestHeading(h.cog, h.hdg, h.declination) : null,
-        cog: cogBad(h.cog) ? null : h.cog,
+        heading: h.headingReliable ? bestHeading(h.courseTrue, h.headingTrue) : null,
+        courseTrue: cogBad(h.courseTrue) ? null : h.courseTrue,
       });
     }
   }
@@ -512,8 +543,8 @@ export function leadTrackPoints(ship, targetTs, lengthM, leadSec) {
     if (h.ts > targetTs && h.ts <= toTs) {
       waypoints.push({
         ts: h.ts, lat: h.lat, lon: h.lon, sog: h.sog,
-        heading: h.headingReliable ? bestHeading(h.cog, h.hdg, h.declination) : null,
-        cog: cogBad(h.cog) ? null : h.cog,
+        heading: h.headingReliable ? bestHeading(h.courseTrue, h.headingTrue) : null,
+        courseTrue: cogBad(h.courseTrue) ? null : h.courseTrue,
       });
     }
   }
@@ -533,11 +564,11 @@ function tickEndpoint(lat, lon, angleDeg, lengthM) {
   return lineEndpoint(lat, lon, angleDeg, tickLenM);
 }
 
-// Length (m) of the cog line, scaled by speed the same way the bow's
+// Length (m) of the course line, scaled by speed the same way the bow's
 // speed-dot trail is (icons.mjs: SPEED_DOT_SPACING px per knot, halved per
 // zoom step below 11) — continuous rather than floored to a dot count,
 // since this is a single line rather than discrete dots.
-function cogLineLengthM(lat, sog) {
+function courseLineLengthM(lat, sog) {
   if (!Number.isFinite(sog) || sog <= 0) return 0;
   const px = (sog / speedDotZoomFactor()) * SPEED_DOT_SPACING;
   const ppm = pixelsPerMeter(lat, map.getZoom());
@@ -545,7 +576,7 @@ function cogLineLengthM(lat, sog) {
 }
 
 // Opens the same fix popup the persistent circle (reconcileFixCircles) uses,
-// but as a standalone map popup rather than one bound to the tick/cog line
+// but as a standalone map popup rather than one bound to the tick/course line
 // itself — those lines are ephemeral (recreated every frame, see below), so
 // a popup bound directly to one would get yanked shut within ~100ms.
 function openFixPopupAt(mmsi, ts, latlng) {
@@ -558,9 +589,9 @@ function openFixPopupAt(mmsi, ts, latlng) {
 // (reconcileFixCircles) so it can persist across frames and hold a
 // clickable popup; clicking either line opens that same popup content.
 // `opacity` lets the lead render fainter.
-function pushTicks(marks, wp, lengthM, color, opacity, mmsi) {
+export function pushTicks(marks, wp, lengthM, color, opacity, mmsi) {
   // Reported heading (bow direction) — dashed, fixed length; diverges from
-  // cog under leeway/current.
+  // courseTrue under leeway/current.
   if (wp.heading != null) {
     const [tLat, tLon] = tickEndpoint(wp.lat, wp.lon, wp.heading, lengthM);
     const tick = L.polyline([[wp.lat, wp.lon], [tLat, tLon]], { color, weight: 1.5, opacity, dashArray: '2,3' }).addTo(map);
@@ -570,13 +601,13 @@ function pushTicks(marks, wp, lengthM, color, opacity, mmsi) {
   // Reported course-over-ground — solid black, length scaled by sog. Kept
   // fainter than the heading tick/trail — it's a secondary detail, easily
   // overpowering the line/icon underneath at full trail opacity.
-  if (wp.cog != null) {
-    const cogLenM = cogLineLengthM(wp.lat, wp.sog);
-    if (cogLenM > 0) {
-      const [cLat, cLon] = lineEndpoint(wp.lat, wp.lon, wp.cog, cogLenM);
-      const cogLine = L.polyline([[wp.lat, wp.lon], [cLat, cLon]], { color: 'black', weight: 3, opacity: opacity * 0.5 }).addTo(map);
-      cogLine.on('click', (e) => openFixPopupAt(mmsi, wp.ts, e.latlng));
-      marks.push(cogLine);
+  if (wp.courseTrue != null) {
+    const courseLenM = courseLineLengthM(wp.lat, wp.sog);
+    if (courseLenM > 0) {
+      const [cLat, cLon] = lineEndpoint(wp.lat, wp.lon, wp.courseTrue, courseLenM);
+      const courseLine = L.polyline([[wp.lat, wp.lon], [cLat, cLon]], { color: 'black', weight: 3, opacity: opacity * 0.5 }).addTo(map);
+      courseLine.on('click', (e) => openFixPopupAt(mmsi, wp.ts, e.latlng));
+      marks.push(courseLine);
     }
   }
 }
@@ -585,7 +616,7 @@ function pushTicks(marks, wp, lengthM, color, opacity, mmsi) {
 // One circle per real AIS report on the trail/lead, kept ALIVE across frames
 // (keyed by report timestamp) — recreating them every 100ms like the ticks
 // would slam any popup shut the instant it opened. Each circle's popup shows
-// the report's identity, raw AIS cog/hdg, position, and the time/distance gaps
+// the report's identity, raw AIS courseTrue/headingTrue, position, and the time/distance gaps
 // to the two fixes on either side.
 function popupRow(label, value) {
   return `<div class="popup-row"><span class="popup-label">${label}</span><span class="popup-value">${value}</span></div>`;
@@ -601,24 +632,10 @@ function fixGap(history, a, b) {
   const nm = haversineNM(history[a].lat, history[a].lon, history[b].lat, history[b].lon);
   return `[${dt}s/${fmtNM(nm)}NM]`;
 }
-// The time/distance gaps around fix `idx` — outer→inner before THIS, then
-// inner→outer after, e.g. "[52s/0.4NM][24s/2NM] THIS [54s/2.5NM][108s/5NM]".
-function adjacentFixGaps(history, idx) {
-  return `${fixGap(history, idx - 2, idx - 1)}${fixGap(history, idx - 1, idx)} THIS ${fixGap(history, idx, idx + 1)}${fixGap(history, idx + 1, idx + 2)}`;
-}
 // The 4 intervals leading up to fix `idx`, then THIS — oldest on the left,
 // e.g. "[55s/2.8NM][60s/3NM][108s/5NM][54s/2.5NM] THIS".
 function previousFixGaps(history, idx) {
   return `${fixGap(history, idx - 4, idx - 3)}${fixGap(history, idx - 3, idx - 2)}${fixGap(history, idx - 2, idx - 1)}${fixGap(history, idx - 1, idx)} THIS`;
-}
-// Used by the AIS Fixes side panel (fixesPanel.mjs), which lists ALL of a
-// selected vessel's stored fixes for inspection — unbounded by the
-// trail/lead sliders (as if no trail were set at all) and independent of
-// the separate "Show AIS fixes" toggle (filterState.showFixes only controls
-// the on-map circles). Still requires the vessel itself be currently shown,
-// same as the map's own fix circles.
-export function isFixInPanelRange(ship) {
-  return ship.onMap;
 }
 
 // Which fix(es) in ship.history the marker's CURRENT position actually
@@ -658,33 +675,30 @@ export function buildFixPopup(mmsi, ts) {
   const f = history[idx];
   const sd = staticData.get(mmsi);
   const name = sd?.name || ship.data?.name || '—';
-  // Same format as the vessel popup (popup.mjs): raw HDG is magnetic, not
-  // true north — only show/use it as a heading once corrected by
-  // declination, never bare. usesHdg/usesCog mirror which one the icon's
-  // rotation would actually be drawn from for this fix.
-  const bh = bestHeading(f.cog, f.hdg, f.declination);
-  const usesHdg = bh != null && !hdgBad(f.hdg);
-  const usesCog = bh != null && hdgBad(f.hdg) && !cogBad(f.cog);
-  const cogStr = cogBad(f.cog) ? `${f.cog != null ? f.cog.toFixed(1) : '—'} (n/a)` : `${f.cog.toFixed(1)}°${usesCog ? ' ← rotation' : ''}`;
-  const hdgVal = f.hdg === 511 ? '0x1FF (n/a)' : (f.hdg === 0 || f.hdg === 360) ? `${f.hdg.toFixed(1)} (unreliable)` : f.hdg != null ? `${f.hdg.toFixed(1)}°` : '—';
-  const decStr = f.declination != null ? `${f.declination > 0 ? '+' : ''}${f.declination}°` : '—';
-  const corrected = usesHdg && f.declination != null
-    ? ` → ${((f.hdg + f.declination + 360) % 360).toFixed(1)}° true` : '';
-  const hdgStr = `${hdgVal}${corrected}${usesHdg ? ' ← rotation' : ''}`;
+  // Same format as the vessel popup (popup.mjs): AIS "True Heading" (HDG) is
+  // already true north (gyrocompass-derived) per ITU-R M.1371 — no
+  // declination correction applies. usesHeadingTrue/usesCourseTrue mirror
+  // which one the icon's rotation would actually be drawn from for this fix.
+  const bh = bestHeading(f.courseTrue, f.headingTrue);
+  const usesHeadingTrue = bh != null && !hdgBad(f.headingTrue);
+  const usesCourseTrue = bh != null && hdgBad(f.headingTrue) && !cogBad(f.courseTrue);
+  const courseTrueStr = cogBad(f.courseTrue) ? `${f.courseTrue != null ? f.courseTrue.toFixed(1) : '—'} (n/a)` : `${f.courseTrue.toFixed(1)}°${usesCourseTrue ? ' ← rotation' : ''}`;
+  const headingTrueVal = f.headingTrue === 511 ? '0x1FF (n/a)' : (f.headingTrue === 0 || f.headingTrue === 360) ? `${f.headingTrue.toFixed(1)} (unreliable)` : f.headingTrue != null ? `${f.headingTrue.toFixed(1)}°` : '—';
+  const headingTrueStr = `${headingTrueVal}${usesHeadingTrue ? ' ← rotation' : ''}`;
   const navLabel = NAV_STATUS[f.navStatus] ?? 'Unknown';
   const navUnreliable = navStatusUnreliable(f.sog, f.navStatus);
   return `
+    <span class="popup-fix-marker" data-mmsi="${mmsi}" data-ts="${f.ts}"></span>
     <div class="popup-name">${name}</div>
     ${popupRow('MMSI', mmsi)}
     ${popupRow('Fix time', new Date(f.ts).toISOString())}
     ${popupRow('Speed', `${f.sog != null ? f.sog.toFixed(1) : '—'} kn`)}
-    ${popupRow('Course', cogStr)}
-    ${popupRow('Heading (mag.)', hdgStr)}
-    <div class="legend-hint">Map ticks: solid black = COG, dashed = HDG</div>
-    ${popupRow('Mag. decl.', decStr)}
+    ${popupRow('Crs (true)', courseTrueStr)}
+    ${popupRow('Hdg (true)', headingTrueStr)}
+    <div class="legend-hint">Map ticks: solid black = Crs, dashed = Hdg</div>
     ${popupRow('Nav status', `${f.navStatus} (${navLabel})${navUnreliable ? ' ' + warn('⚠ unreliable (sog ≥ 0.5kn)') : ''}`)}
     ${popupRow('Position (middle)', `lat=${f.lat.toFixed(5)} lon=${f.lon.toFixed(5)}`)}
-    <div class="popup-fixgaps"><span class="popup-label">Fix intervals</span><br>${adjacentFixGaps(history, idx)}</div>
+    <div class="popup-fixes-row"><button type="button" class="popup-fixes-btn" data-mmsi="${mmsi}">AIS Fixes ›</button></div>
   `;
 }
 // Reconcile a ship's persistent, clickable fix circles against the set of
@@ -781,18 +795,19 @@ export function startSmoothMotionLoop(getTrailSec, getLeadSec, getShowFixes) {
       ship.marker.setLatLng(wrapLatLngNearCenter(ship.middle));
       updateLabel(mmsi);
 
-      // hdg drives the bow's drawn orientation (fallback: cog, then the
-      // icon's last drawn heading); cog drives the speed-dot trail direction
-      // (fallback: whatever heading resolved to) — same split live mode
-      // uses. Both are now the curve's own exact analytic values (see
-      // kinematicPoint) rather than a frame-to-frame bearing estimate — a
-      // previous version derived heading from the position delta between
-      // animation ticks instead, as a workaround for the old dead-reckoning
-      // model's heading not reliably matching its own drawn path; the
-      // Hermite curve here doesn't have that mismatch; its heading already
-      // IS the path's tangent (plus the heading/course crab offset).
-      const headingAngle = snap.data.hdg ?? snap.data.cog ?? ship.smoothIconHeading ?? ship.lastGoodHeading ?? 0;
-      const dotAngle = snap.data.cog ?? headingAngle;
+      // headingTrue drives the bow's drawn orientation (fallback: courseTrue,
+      // then the icon's last drawn heading); courseTrue drives the
+      // speed-dot trail direction (fallback: whatever heading resolved to)
+      // — same split live mode uses. Both are now the curve's own exact
+      // analytic values (see kinematicPoint) rather than a frame-to-frame
+      // bearing estimate — a previous version derived heading from the
+      // position delta between animation ticks instead, as a workaround for
+      // the old dead-reckoning model's heading not reliably matching its
+      // own drawn path; the Hermite curve here doesn't have that mismatch;
+      // its heading already IS the path's tangent (plus the heading/course
+      // crab offset).
+      const headingAngle = snap.data.headingTrue ?? snap.data.courseTrue ?? ship.smoothIconHeading ?? ship.lastGoodHeading ?? 0;
+      const dotAngle = snap.data.courseTrue ?? headingAngle;
 
       // setIcon() replaces the marker's DOM element — doing that every 100ms
       // raced with click handling and broke popups. Only redraw when the

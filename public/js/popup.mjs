@@ -57,29 +57,27 @@ export function buildPopup(mmsi) {
     <div class="popup-sep"></div>
     ${row(`Speed${simLabel}`,      `${d.sog != null ? d.sog.toFixed(1) : '—'} kn`)}
     ${simulated ? (() => {
-      // d.cog/d.hdg here are already the fully resolved course/heading the
-      // smooth-motion loop computed (or null if genuinely unknown) — none
-      // of live mode's raw-sentinel decoding (511, declination correction,
-      // etc.) applies, since that resolution already happened upstream
-      // (declination is already baked into hdg there, so it's not its own
-      // row here the way it is in the raw/live branch below).
-      const courseStr = d.cog != null ? `${d.cog.toFixed(1)}°` : '— (n/a)';
-      const headingStr = d.hdg != null ? `${d.hdg.toFixed(1)}°` : '— (n/a)';
-      return row(`Course${simLabel}`, courseStr) + row(`Heading (true)${simLabel}`, headingStr);
+      // d.courseTrue/d.headingTrue here are already the fully resolved
+      // course/heading the smooth-motion loop computed (or null if
+      // genuinely unknown) — none of live mode's raw-sentinel decoding
+      // (511, etc.) applies, since that resolution already happened
+      // upstream.
+      const courseStr = d.courseTrue != null ? `${d.courseTrue.toFixed(1)}°` : '— (n/a)';
+      const headingStr = d.headingTrue != null ? `${d.headingTrue.toFixed(1)}°` : '— (n/a)';
+      return row(`Crs (true)${simLabel}`, courseStr) + row(`Hdg (true)${simLabel}`, headingStr);
     })() : (()=>{
-      const bh = bestHeading(d.cog, d.hdg, d.declination);
-      const usesHdg = bh != null && !hdgBad(d.hdg);
-      const usesCog = bh != null && hdgBad(d.hdg) && !cogBad(d.cog);
-      const cogStr = cogBad(d.cog) ? `${d.cog != null ? d.cog.toFixed(1) : '—'} (n/a)` : `${d.cog.toFixed(1)}°${usesCog ? ' ← rotation' : ''}`;
-      const hdgVal = d.hdg === 511 ? '0x1FF (n/a)' : (d.hdg === 0 || d.hdg === 360) ? `${d.hdg.toFixed(1)} (unreliable)` : d.hdg != null ? `${d.hdg.toFixed(1)}°` : '—';
-      const decStr = d.declination != null ? `${d.declination > 0 ? '+' : ''}${d.declination}°` : '—';
-      const corrected = usesHdg && d.declination != null
-        ? ` → ${((d.hdg + d.declination + 360) % 360).toFixed(1)}° true` : '';
-      const hdgStr = `${hdgVal}${corrected}${usesHdg ? ' ← rotation' : ''}`;
+      const bh = bestHeading(d.courseTrue, d.headingTrue);
+      const usesHeadingTrue = bh != null && !hdgBad(d.headingTrue);
+      const usesCourseTrue = bh != null && hdgBad(d.headingTrue) && !cogBad(d.courseTrue);
+      const courseTrueStr = cogBad(d.courseTrue) ? `${d.courseTrue != null ? d.courseTrue.toFixed(1) : '—'} (n/a)` : `${d.courseTrue.toFixed(1)}°${usesCourseTrue ? ' ← rotation' : ''}`;
+      // AIS "True Heading" is already true north (gyrocompass-derived) per
+      // ITU-R M.1371 — no declination correction applies, despite the field's
+      // colloquial name.
+      const headingTrueVal = d.headingTrue === 511 ? '0x1FF (n/a)' : (d.headingTrue === 0 || d.headingTrue === 360) ? `${d.headingTrue.toFixed(1)} (unreliable)` : d.headingTrue != null ? `${d.headingTrue.toFixed(1)}°` : '—';
+      const headingTrueStr = `${headingTrueVal}${usesHeadingTrue ? ' ← rotation' : ''}`;
       const lastKnownNote = ship.usingLastKnownHeading ? ' (using last known heading)' : '';
-      return row('AIS COG', cogStr)
-        + row('AIS HDG', `${hdgStr}${lastKnownNote}`)
-        + row('Mag. decl.', decStr);
+      return row('AIS Crs (true)', courseTrueStr)
+        + row('AIS Hdg (true)', `${headingTrueStr}${lastKnownNote}`);
     })()}
     ${row(`Nav status${simLabel}`, `${d.navStatus} (${navLabel})${navUnreliable ? ' ' + warn('⚠ unreliable (sog ≥ 0.5kn)') : ''}`)}
     ${row(`Position (middle)${simLabel}`, `lat=${d.lat.toFixed(5)} lon=${d.lon.toFixed(5)}${ship.isFloating ? ' ' + warn('(floating)') : ''}`)}
@@ -88,7 +86,7 @@ export function buildPopup(mmsi) {
       // see updateShip in messages.mjs) — recovered here on demand, only
       // while the setting is on and there's a dim-derived offset to undo.
       if (!filterState.showAntenna || !dim) return '';
-      const heading = simulated ? d.hdg : bestHeading(d.cog, d.hdg, d.declination);
+      const heading = simulated ? d.headingTrue : bestHeading(d.courseTrue, d.headingTrue);
       const [aLat, aLon] = gpsAntennaPosition(d.lat, d.lon, heading, dim);
       return row(`GPS antenna${simLabel}`, `lat=${aLat.toFixed(5)} lon=${aLon.toFixed(5)}`);
     })()}

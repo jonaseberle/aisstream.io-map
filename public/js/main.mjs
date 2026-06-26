@@ -8,6 +8,7 @@ import { loadSettings, resetSettings, saveSettings } from './settings.mjs';
 import { filterState, applyVisibility } from './visibility.mjs';
 import { ships } from './state.mjs';
 import { initFixesPanel, refreshFixesPanel } from './fixesPanel.mjs';
+import { refreshHeatmap } from './heatmap.mjs';
 
 loadVesselData();
 setInterval(saveVesselData, 30_000);
@@ -27,7 +28,7 @@ setInterval(saveSettings, 5_000);
 // the open panel's list keeps up with the lead/trail window sliding forward
 // and new fixes arriving.
 (function scheduleMessageFlush() {
-  setTimeout(() => { flushMessageQueue(); pruneOldFixes(); refreshFixesPanel(); scheduleMessageFlush(); }, filterState.messageFlushMs);
+  setTimeout(() => { flushMessageQueue(); pruneOldFixes(); refreshFixesPanel(); refreshHeatmap(); scheduleMessageFlush(); }, filterState.messageFlushMs);
 })();
 startStatsLoop();
 initWebSocket();

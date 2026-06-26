@@ -35,6 +35,7 @@ export const filterState = {
   hideUnreliableNavStatus: false,
   showLabels: false,
   showAntenna: false,
+  showHeatmap: false,
   displayCollapsed: false,
   filtersCollapsed: false,
   shipTypesCollapsed: false,
@@ -143,7 +144,7 @@ export function isShipVisible(mmsi) {
     floatingMetric = (d.ts ? (nowRef - d.ts) / 1000 : 0) - filterState.maxAgeSec;
   }
 
-  const noHeading = hdgBad(d.hdg) && cogBad(d.cog);
+  const noHeading = hdgBad(d.headingTrue) && cogBad(d.courseTrue);
   const ageSec    = d.ts ? (nowRef - d.ts) / 1000 : 0;
   // Once floating, stay visible (faded, with the "!" mark) for floatingDisplaySec
   // more seconds before actually being hidden. At the slider ceiling, never hide.
@@ -177,7 +178,10 @@ export function isShipVisible(mmsi) {
 export function applyVisibility(mmsi) {
   const ship = ships.get(mmsi);
   if (!ship) return;
-  const visible = isShipVisible(mmsi);
+  // The heatmap is a density overview, not meant to be read alongside
+  // individual icons/labels/trails — showing it hides every ship's marker
+  // (heatmap.mjs still uses isShipVisible directly to source its points).
+  const visible = isShipVisible(mmsi) && !filterState.showHeatmap;
 
   if (visible && !ship.onMap)      { ship.marker.addTo(map); ship.onMap = true; }
   if (!visible && ship.onMap)      { ship.marker.remove();   ship.onMap = false; }

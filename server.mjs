@@ -3,11 +3,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
-import geomagnetism from 'geomagnetism';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const geoModel = geomagnetism.model(); // IGRF model for current date
 
 const LOG_FILE = path.join(__dirname, 'debug.log');
 const logStream = fs.createWriteStream(LOG_FILE, { flags: 'w' });
@@ -23,7 +21,7 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-// Vendored front-end deps (Leaflet, lz-string) are served from disk rather
+// Vendored front-end deps (Leaflet, lz-string, Leaflet.heat) are served from disk rather
 // than a CDN — copied here from node_modules on every startup instead of
 // committed, so public/dist/ stays in .gitignore and always matches
 // whatever's actually installed (package.json/package-lock.json is the
@@ -37,7 +35,12 @@ function vendorAssets() {
     path.join(__dirname, 'node_modules', 'lz-string', 'libs', 'lz-string.min.js'),
     path.join(dist, 'lz-string', 'lz-string.min.js')
   );
-  log('Vendored Leaflet + lz-string into public/dist/');
+  fs.mkdirSync(path.join(dist, 'leaflet.heat'), { recursive: true });
+  fs.copyFileSync(
+    path.join(__dirname, 'node_modules', 'leaflet.heat', 'dist', 'leaflet-heat.js'),
+    path.join(dist, 'leaflet.heat', 'leaflet-heat.js')
+  );
+  log('Vendored Leaflet + lz-string + Leaflet.heat into public/dist/');
 }
 vendorAssets();
 
@@ -231,18 +234,18 @@ function connectToAIS() {
         lon = payload?.Longitude;
         const name = msg.MetaData?.ShipName?.trim() || 'Unknown';
         const sog  = payload?.Sog;
-        const cog  = payload?.Cog;
-        const hdg  = payload?.TrueHeading;
+        const courseTrue  = payload?.Cog;
+        const headingTrue  = payload?.TrueHeading;
         const meta = shipMeta.get(mmsi);
         const typeStr = meta ? ` type=${meta.typeCode}` : '';
         const merged = mergedClientBounds();
         const boundsStr = (lat != null && lon != null)
           ? (inAnyBounds(lat, lon, merged) ? ' [IN]' : ` [OUT bounds=${JSON.stringify(merged)}]`)
           : ' [no coords]';
-        log(`[${msg.MessageType}] ${name} (${mmsi}) lat=${lat?.toFixed(4)} lon=${lon?.toFixed(4)} sog=${sog} cog=${cog} hdg=${hdg}${typeStr}${boundsStr}`);
+        log(`[${msg.MessageType}] ${name} (${mmsi}) lat=${lat?.toFixed(4)} lon=${lon?.toFixed(4)} sog=${sog} courseTrue=${courseTrue} headingTrue=${headingTrue}${typeStr}${boundsStr}`);
 
-        // Enrich position messages with cached static data, magnetic
-        // declination, and the upstream-reported timestamp (_ts)
+        // Enrich position messages with cached static data and the
+        // upstream-reported timestamp (_ts)
         const extra = {};
         if (meta) extra._meta = meta;
         // The actual moment aisstream.io received/relayed this report —
@@ -253,10 +256,6 @@ function connectToAIS() {
         // messages.mjs) if missing/unparseable.
         const ts = parseAisTimeUtc(msg.MetaData?.time_utc);
         if (ts != null) extra._ts = ts;
-        if (lat != null && lon != null) {
-          // geomagnetism expects [longitude, latitude]
-          extra._declination = +geoModel.point([lon, lat]).decl.toFixed(2);
-        }
         outStr = JSON.stringify(Object.assign({}, msg, extra));
       }
     } catch (_) {}

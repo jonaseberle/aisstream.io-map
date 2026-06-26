@@ -97,6 +97,18 @@ function redrawAreaRects() {
     }).addTo(map);
   }
   updateBoundsWarning();
+  updateRemoveButtonState();
+}
+
+// Nothing to click on once the last area's gone — dim/disable "Remove area"
+// rather than leaving it armable with no effect, and drop out of remove
+// mode itself if it was already armed when the last area disappeared.
+function updateRemoveButtonState() {
+  const removeBtn = document.getElementById('remove-area-button');
+  if (!removeBtn) return;
+  const hasAreas = boundsRectState.areas.length > 0;
+  removeBtn.disabled = !hasAreas;
+  if (!hasAreas) cancelRemoveArea();
 }
 
 function updateBoundsWarning() {
@@ -214,6 +226,7 @@ function onRemoveClick(e) {
 }
 
 function armRemoveArea() {
+  if (boundsRectState.areas.length === 0) return;
   cancelAddArea();
   setArmed('remove-area-button', true);
   map.getContainer().style.cursor = 'crosshair';
@@ -293,7 +306,7 @@ function onMapMove() {
   }, 500);
 }
 
-// Icon dimensions/speed-dot count/cog-line length are all zoom-dependent
+// Icon dimensions/speed-dot count/course-line length are all zoom-dependent
 // (pixelsPerMeter, speedDotZoomFactor), but markers don't repaint until
 // they're explicitly redrawn — without this they'd stay at their pre-zoom
 // pixel size for a moment after the map's zoom level (and thus everything

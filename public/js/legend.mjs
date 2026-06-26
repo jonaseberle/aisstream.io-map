@@ -8,6 +8,7 @@ import { filterState, hiddenCategories, hiddenTypes, applyVisibility, refreshTra
 import { clearVesselData, disableLocalStorage, saveVesselData } from './storage.mjs';
 import { scheduleLabelRecompute, refreshIcon } from './messages.mjs';
 import { saveSettings } from './settings.mjs';
+import { setHeatmapEnabled, refreshHeatmap } from './heatmap.mjs';
 
 // ── Legend ───────────────────────────────────────────────────────────────
 // Builds the settings/filter panel content — used to be the content of an
@@ -208,17 +209,15 @@ function buildLegendContent() {
       // redraws on a heading change — this toggle doesn't change heading.
       for (const [mmsi, ship] of ships) { refreshIcon(mmsi); ship.smoothIconHeading = null; }
     }));
-
     const speedHint = document.createElement('div');
     speedHint.id = 'speed-hint';
     speedHint.className = 'legend-hint';
     speedHint.textContent = 'Each white dot ahead of the bow = 1 kn of speed';
     displayBody.appendChild(speedHint);
 
-    const mapSourceTitle = document.createElement('div');
-    mapSourceTitle.className = 'legend-hint';
-    mapSourceTitle.style.marginTop = '8px';
-    mapSourceTitle.textContent = 'Map style:';
+    const mapSourceTitle = document.createElement('h3');
+    mapSourceTitle.className = 'legend-subheading';
+    mapSourceTitle.textContent = 'Map style';
     displayBody.appendChild(mapSourceTitle);
 
     // Applies the cookie-restored choice right away — map.mjs itself only
@@ -232,6 +231,14 @@ function buildLegendContent() {
         setMapSource(key);
       }));
     }
+
+    setHeatmapEnabled(filterState.showHeatmap); // restore cookie-saved choice, same as setMapSource above
+    displayBody.appendChild(mkCheckRow('filter-show-heatmap', 'Show vessel density heatmap', filterState.showHeatmap, (e) => {
+      filterState.showHeatmap = e.target.checked;
+      setHeatmapEnabled(filterState.showHeatmap);
+      refreshHeatmap();
+      for (const mmsi of ships.keys()) applyVisibility(mmsi);
+    }));
 
     const sliderRow = document.createElement('div');
     sliderRow.className = 'legend-slider';

@@ -114,14 +114,40 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 /* AIS Fixes tab content (fixesPanel.js) */
 .fixes-panel-title {
   padding: 10px 14px 0; font-weight: 600; font-size: 13px; color: var(--color-accent);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
 }
+.fixes-panel-title-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fixes-panel-ship-btn {
+  background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
+  color: var(--color-text); padding: 4px 9px; font-size: 11px; cursor: pointer; flex: 0 0 auto;
+}
+.fixes-panel-ship-btn:hover { background: var(--color-border); }
+.fixes-panel-ship-btn:disabled { opacity: 0.6; color: var(--color-warn); cursor: default; }
+.fixes-panel-ship-btn:disabled:hover { background: var(--color-button-bg); }
 .fixes-panel-body { padding: 8px 14px; }
 .fixes-header-row, .fixes-row {
-  display: grid; grid-template-columns: 1.3fr 0.8fr 0.8fr 0.8fr 0.8fr; gap: 6px;
+  display: grid; grid-template-columns: 1.3fr 0.8fr 0.8fr 0.8fr; gap: 6px;
   padding: 3px 0;
 }
 .fixes-header-row { color: var(--color-text-secondary); font-weight: 600; border-bottom: 1px solid var(--color-border); margin-bottom: 4px; }
+/* Gutter beside the rows showing where "now"/the smooth-motion lagged
+   instant falls relative to the listed fixes (positioned in JS via
+   positionTimelineDot, since it depends on each row's actual rendered
+   height, not just its index). */
+.fixes-timeline-wrap { display: flex; }
+.fixes-timeline-track { position: relative; width: 16px; flex: 0 0 auto; }
+.fixes-timeline-line {
+  position: absolute; left: 50%; top: 0; bottom: 0; width: 2px;
+  background: var(--color-border); transform: translateX(-50%);
+}
+.fixes-timeline-dot {
+  position: absolute; left: 50%; top: 0; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--color-accent); transform: translate(-50%, -50%);
+  box-shadow: 0 0 4px var(--color-accent);
+}
+.fixes-rows { flex: 1 1 auto; min-width: 0; }
+.fixes-fix { cursor: pointer; border-radius: 4px; }
+.fixes-fix:hover { background: var(--color-border); }
 .fixes-pos { font-size: 10px; color: var(--color-text-secondary); font-family: ui-monospace, monospace; padding-bottom: 3px; }
 /* Wraps one fix's row+pos together so the border below encloses both — the
    vessel's CURRENT position: the single newest fix in live mode, or both
@@ -130,6 +156,12 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
   border: 1px solid var(--color-accent); border-radius: 4px;
   padding: 2px 4px; margin: 2px 0;
 }
+/* The fix whose popup is currently open on the map (see popupopen/popupclose
+   tracking in fixesPanel.mjs) — independent of fixes-fix-current, which
+   marks the live/interpolated position instead. */
+.fixes-fix-open { background: var(--color-accent); color: var(--color-bg); }
+.fixes-fix-open:hover { background: var(--color-accent); }
+.fixes-fix-open .fixes-pos { color: var(--color-bg); }
 /* Marks the fix that tripped "speed unreliable" or "position unreliable"
    (messages.js's spoof check) — hover for which, and why, via title=. */
 .fixes-warn { color: var(--color-warn); font-weight: 700; cursor: help; }
@@ -163,8 +195,8 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 .popup-value a { color: var(--color-accent); }
 .popup-warn { color: var(--color-warn); font-weight: 600; }
 .popup-sep { border-top: 1px solid var(--color-border); margin: 7px 0; }
-.popup-fixgaps { margin-top: 8px; font-family: ui-monospace, monospace; font-size: 11px; color: var(--color-accent); line-height: 1.5; word-break: break-word; }
 .popup-fixes-row { margin-top: 8px; display: flex; justify-content: flex-end; }
+.popup-fix-marker { display: none; }
 .popup-fixes-btn {
   background: var(--color-button-bg); border: 1px solid var(--color-border); border-radius: 4px;
   color: var(--color-text); padding: 4px 9px; font-size: 11px; cursor: pointer;
@@ -188,6 +220,7 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
   user-select: none;
 }
 .legend-title { font-weight: 600; color: var(--color-accent); margin-bottom: 8px; font-size: 13px; }
+.legend-subheading { font-weight: 600; font-size: 12px; margin: 8px 0 4px; }
 .legend-group-title { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
 .legend-group-body { margin-bottom: 4px; }
 .legend-group-body.collapsed { display: none; }
@@ -198,6 +231,8 @@ body { font-family: sans-serif; background: var(--color-bg); color: var(--color-
 }
 .legend-button:hover { background: var(--color-border); }
 .legend-button.armed { background: var(--color-accent); color: var(--color-bg); border-color: var(--color-accent); }
+.legend-button:disabled { opacity: 0.4; cursor: default; }
+.legend-button:disabled:hover { background: var(--color-button-bg); }
 .legend-button-row { display: flex; gap: 6px; }
 .legend-button-row .legend-button { flex: 1; margin-bottom: 8px; }
 .legend-button-icon { margin-right: .7em; }
